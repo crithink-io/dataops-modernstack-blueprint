@@ -1,0 +1,43 @@
+{{
+    config(
+        materialized='incremental',
+        unique_key='_bronze_sk',
+        incremental_strategy='append',
+        tags=['zone:bronze', 'sensitivity:public', 'domain:product']
+    )
+}}
+
+with validated_transient as (
+    select * from {{ ref('trn_products') }}
+    where _is_valid = true
+),
+
+tagged as (
+    select
+        product_id,
+        product_name,
+        category,
+        subcategory,
+        brand,
+        price,
+        cost,
+        description,
+        is_active,
+        created_at,
+        updated_at,
+        -- Carry forward transient metadata
+        _loaded_at,
+        _batch_id,
+        -- Bronze-specific tagging
+        'fivetran' as _source_system,
+        'product' as _domain,
+        'public' as _sensitivity_tag,
+        current_timestamp() as _bronze_inserted_at,
+        {{ dbt_utils.generate_surrogate_key(['product_id', '_batch_id']) }} as _bronze_sk
+    from validated_transient
+)
+
+select * from tagged
+{% if is_incremental() %}
+    where _loaded_at > (select coalesce(max(_loaded_at), '1900-01-01') from {{ this }})
+{% endif %}

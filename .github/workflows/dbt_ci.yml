@@ -1,0 +1,203 @@
+name: dbt - CI Build on PR
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [main, uat, dev]
+    paths:
+      - 'dbt-project/**'
+      - '.github/workflows/dbt_ci.yml'
+
+concurrency:
+  group: dbt-ci-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: dbt-project
+
+jobs:
+  # ── Lint: SQLFluff + YAML validation (blocks merge on failure) ──
+  dbt_lint:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r dbt-requirements.txt
+
+      - name: dbt deps (needed for SQLFluff templater)
+        run: dbt deps --target dev
+        env:
+          SNOWFLAKE_ACCOUNT:   'placeholder'
+          SNOWFLAKE_USER:      'placeholder'
+          SNOWFLAKE_PASSWORD:  'placeholder'
+          SNOWFLAKE_ROLE:      'placeholder'
+          SNOWFLAKE_WAREHOUSE: 'placeholder'
+          SNOWFLAKE_DATABASE:  'placeholder'
+
+      - name: SQLFluff lint
+        run: sqlfluff lint models/ macros/ snapshots/ tests/ analyses/
+
+      - name: Validate YAML files
+        run: |
+          python -c "
+          import yaml, glob, sys
+          errors = []
+          for f in glob.glob('**/*.yml', recursive=True):
+              try:
+                  with open(f) as fh:
+                      yaml.safe_load(fh)
+              except yaml.YAMLError as e:
+                  errors.append(f'{f}: {e}')
+          if errors:
+              for e in errors:
+                  print(f'ERROR: {e}', file=sys.stderr)
+              sys.exit(1)
+          print('All YAML files valid.')
+          "
+
+  # ── Build: dbt build in isolated PR schema ─────────────────────
+  dbt_build:
+    needs: dbt_lint
+    runs-on: ubuntu-latest
+
+    env:
+      SNOWFLAKE_ACCOUNT:      ${{ secrets.SNOWFLAKE_ACCOUNT }}
+      SNOWFLAKE_USER:         ${{ secrets.SNOWFLAKE_USER }}
+      SNOWFLAKE_PASSWORD:     ${{ secrets.SNOWFLAKE_PASSWORD }}
+      SNOWFLAKE_ROLE:         ${{ secrets.SNOWFLAKE_ROLE }}
+      SNOWFLAKE_WAREHOUSE:    ${{ secrets.SNOWFLAKE_WAREHOUSE }}
+      SNOWFLAKE_DATABASE:     ${{ secrets.SNOWFLAKE_DATABASE }}
+      SNOWFLAKE_CI_DATABASE:  ${{ secrets.SNOWFLAKE_CI_DATABASE }}
+      SNOWFLAKE_CI_ROLE:      ${{ secrets.SNOWFLAKE_CI_ROLE }}
+      DBT_TARGET: ci
+
+    steps:
+      # ── Setup ─────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r dbt-requirements.txt
+
+      # ── Determine environment from base branch ────────────────
+      - name: Determine target environment
+        run: |
+          BASE_BRANCH="${{ github.event.pull_request.base.ref }}"
+          case "$BASE_BRANCH" in
+            main)
+              echo "TARGET_ENV=prod" >> $GITHUB_ENV
+              echo "SAMPLE_PCT=0" >> $GITHUB_ENV
+              echo "MANIFEST_ARTIFACT_NAME=dbt-manifest-prod" >> $GITHUB_ENV
+              echo "SOURCE_DB=${{ secrets.SNOWFLAKE_DATABASE_PROD }}" >> $GITHUB_ENV
+              ;;
+            uat)
+              echo "TARGET_ENV=uat" >> $GITHUB_ENV
+              echo "SAMPLE_PCT=0" >> $GITHUB_ENV
+              echo "MANIFEST_ARTIFACT_NAME=dbt-manifest-uat" >> $GITHUB_ENV
+              echo "SOURCE_DB=${{ secrets.SNOWFLAKE_DATABASE_UAT }}" >> $GITHUB_ENV
+              ;;
+            dev)
+              echo "TARGET_ENV=dev" >> $GITHUB_ENV
+              echo "SAMPLE_PCT=10" >> $GITHUB_ENV
+              echo "MANIFEST_ARTIFACT_NAME=dbt-manifest-dev" >> $GITHUB_ENV
+              echo "SOURCE_DB=${{ secrets.SNOWFLAKE_DATABASE_DEV }}" >> $GITHUB_ENV
+              ;;
+          esac
+
+      # ── Generate PR schema name ──────────────────────────────
+      - name: Generate Schema ID
+        run: |
+          SCHEMA_ID="${{ github.event.pull_request.number }}__$(echo ${{ github.event.pull_request.head.sha }} | cut -c1-7 | tr '[:lower:]' '[:upper:]')"
+          echo "SCHEMA_ID=$SCHEMA_ID" >> $GITHUB_ENV
+
+      # ── Download manifest from target env for slim CI ─────────
+      - name: Download target environment manifest
+        continue-on-error: true
+        id: download_manifest
+        shell: bash
+        run: |
+          echo "Fetching artifact list for $MANIFEST_ARTIFACT_NAME..."
+          curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${{ github.repository }}/actions/artifacts?per_page=100" \
+              -o artifacts.json
+
+          artifact_id=$(grep -A10 "\"name\": \"$MANIFEST_ARTIFACT_NAME\"" artifacts.json \
+            | grep '"archive_download_url":' \
+            | head -n1 \
+            | sed 's/.*artifacts\/\([0-9]*\)\/zip.*/\1/')
+
+          if [ -z "$artifact_id" ]; then
+            echo "No manifest found for $MANIFEST_ARTIFACT_NAME. Will run full build."
+            echo "HAS_MANIFEST=false" >> $GITHUB_ENV
+            exit 0
+          fi
+
+          echo "Found artifact ID: $artifact_id. Downloading..."
+          curl -sL -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${{ github.repository }}/actions/artifacts/$artifact_id/zip" \
+              -o artifact.zip
+
+          unzip -q artifact.zip -d state
+          echo "HAS_MANIFEST=true" >> $GITHUB_ENV
+          echo "Manifest extracted to ./state/"
+
+      # ── dbt deps ──────────────────────────────────────────────
+      - name: dbt deps
+        run: dbt deps --target $DBT_TARGET --vars "schema_id: $SCHEMA_ID"
+
+      # ── Source freshness check (uat/prod only) ──────────────
+      # If source data is stale, there's no point cloning and
+      # building against outdated data. Warns but does not block.
+      - name: Check source freshness
+        if: env.TARGET_ENV != 'dev'
+        continue-on-error: true
+        run: dbt source freshness --target $DBT_TARGET --vars "schema_id: $SCHEMA_ID"
+
+      # ── Clone data into PR schema via stored procedure ────────
+      - name: Clone data for CI
+        run: |
+          dbt run-operation clone_for_ci \
+            --target $DBT_TARGET \
+            --vars "schema_id: $SCHEMA_ID" \
+            --args "{
+              source_db: '$SOURCE_DB',
+              source_schema_list: 'TRANSIENT,BRONZE,SILVER,GOLD,GOLD_ANALYTICS',
+              target_schema: 'PR_$SCHEMA_ID',
+              env_type: '$TARGET_ENV',
+              sample_pct: $SAMPLE_PCT,
+              role_name: '${{ secrets.SNOWFLAKE_CI_ROLE }}'
+            }"
+
+      # ── dbt build (slim CI when state is available) ───────────
+      - name: dbt build
+        run: |
+          if [ "$HAS_MANIFEST" = "true" ]; then
+            echo "Running slim CI with state:modified+ and --defer"
+            dbt build -s 'state:modified+' \
+              --defer --state ./state \
+              --target $DBT_TARGET \
+              --vars "schema_id: $SCHEMA_ID"
+          else
+            echo "No manifest available. Running full build."
+            dbt build \
+              --target $DBT_TARGET \
+              --vars "schema_id: $SCHEMA_ID"
+          fi

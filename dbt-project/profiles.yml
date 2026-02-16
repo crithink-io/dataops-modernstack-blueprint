@@ -1,0 +1,54 @@
+# Maintainer: Anouar Zbaida
+# Snowflake connection profiles for all environments.
+# Targets: dev, uat, prod, ci (PR testing in _db_utils)
+
+snowflake:
+  target: dev
+  outputs:
+    dev:
+      type: snowflake
+      account: "{{ env_var('SNOWFLAKE_ACCOUNT') }}"
+      user: "{{ env_var('SNOWFLAKE_USER') }}"
+      password: "{{ env_var('SNOWFLAKE_PASSWORD') }}"
+      role: "{{ env_var('SNOWFLAKE_ROLE') }}"
+      warehouse: "{{ env_var('SNOWFLAKE_WAREHOUSE') }}"
+      database: "{{ env_var('SNOWFLAKE_DATABASE_DEV', env_var('SNOWFLAKE_DATABASE')) }}"
+      schema: "{{ env_var('SNOWFLAKE_SCHEMA_DEV', 'DEV') }}"
+      threads: 4
+      client_session_keep_alive: false
+
+    uat:
+      type: snowflake
+      account: "{{ env_var('SNOWFLAKE_ACCOUNT') }}"
+      user: "{{ env_var('SNOWFLAKE_USER') }}"
+      password: "{{ env_var('SNOWFLAKE_PASSWORD') }}"
+      role: "{{ env_var('SNOWFLAKE_ROLE') }}"
+      warehouse: "{{ env_var('SNOWFLAKE_WAREHOUSE') }}"
+      database: "{{ env_var('SNOWFLAKE_DATABASE_UAT', env_var('SNOWFLAKE_DATABASE')) }}"
+      schema: "{{ env_var('SNOWFLAKE_SCHEMA_UAT', 'UAT') }}"
+      threads: 4
+      client_session_keep_alive: false
+
+    prod:
+      type: snowflake
+      account: "{{ env_var('SNOWFLAKE_ACCOUNT') }}"
+      user: "{{ env_var('SNOWFLAKE_USER') }}"
+      password: "{{ env_var('SNOWFLAKE_PASSWORD') }}"
+      role: "{{ env_var('SNOWFLAKE_ROLE') }}"
+      warehouse: "{{ env_var('SNOWFLAKE_WAREHOUSE') }}"
+      database: "{{ env_var('SNOWFLAKE_DATABASE_PROD', env_var('SNOWFLAKE_DATABASE')) }}"
+      schema: "{{ env_var('SNOWFLAKE_SCHEMA_PROD', 'PROD') }}"
+      threads: 4
+      client_session_keep_alive: false
+
+    ci:
+      type: snowflake
+      account: "{{ env_var('SNOWFLAKE_ACCOUNT') }}"
+      user: "{{ env_var('SNOWFLAKE_USER') }}"
+      password: "{{ env_var('SNOWFLAKE_PASSWORD') }}"
+      role: "{{ env_var('SNOWFLAKE_CI_ROLE', env_var('SNOWFLAKE_ROLE')) }}"
+      warehouse: "{{ env_var('SNOWFLAKE_WAREHOUSE') }}"
+      database: "{{ env_var('SNOWFLAKE_CI_DATABASE', '_DB_UTILS') }}"
+      schema: "PR_{{ var('schema_id', '0__0000000') }}"
+      threads: 4
+      client_session_keep_alive: false

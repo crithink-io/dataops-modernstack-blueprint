@@ -1,0 +1,112 @@
+version: 2
+
+models:
+  - name: trn_customers
+    description: "Transient landing for customer data. Technical validation applied."
+    columns:
+      - name: customer_id
+        description: "Source customer identifier"
+        data_tests:
+          - not_null:
+              where: "_is_valid = true"
+      - name: _is_valid
+        description: "Technical validation flag"
+        data_tests:
+          - not_null
+      - name: _loaded_at
+        description: "Timestamp when data was loaded"
+        data_tests:
+          - not_null
+      - name: _batch_id
+        description: "dbt invocation batch identifier"
+        data_tests:
+          - not_null
+
+  - name: trn_orders
+    description: "Transient landing for order data. Technical validation applied."
+    columns:
+      - name: order_id
+        description: "Source order identifier"
+        data_tests:
+          - not_null:
+              where: "_is_valid = true"
+      - name: _is_valid
+        data_tests:
+          - not_null
+      - name: _loaded_at
+        data_tests:
+          - not_null
+
+  - name: trn_order_items
+    description: "Transient landing for order items data. Technical validation applied."
+    columns:
+      - name: order_item_id
+        description: "Source order item identifier"
+        data_tests:
+          - not_null:
+              where: "_is_valid = true"
+      - name: _is_valid
+        data_tests:
+          - not_null
+      - name: _loaded_at
+        data_tests:
+          - not_null
+
+  - name: trn_products
+    description: "Transient landing for product data. Technical validation applied."
+    columns:
+      - name: product_id
+        description: "Source product identifier"
+        data_tests:
+          - not_null:
+              where: "_is_valid = true"
+      - name: _is_valid
+        data_tests:
+          - not_null
+      - name: _loaded_at
+        data_tests:
+          - not_null
+
+  - name: trn_customers_rejects
+    description: "Technical reject table for customer records that failed validation"
+    columns:
+      - name: _reject_id
+        data_tests:
+          - not_null
+          - unique
+      - name: _reject_reason
+        data_tests:
+          - not_null
+
+  - name: trn_orders_rejects
+    description: "Technical reject table for order records that failed validation"
+    columns:
+      - name: _reject_id
+        data_tests:
+          - not_null
+          - unique
+      - name: _reject_reason
+        data_tests:
+          - not_null
+
+  - name: trn_order_items_rejects
+    description: "Technical reject table for order item records that failed validation"
+    columns:
+      - name: _reject_id
+        data_tests:
+          - not_null
+          - unique
+      - name: _reject_reason
+        data_tests:
+          - not_null
+
+  - name: trn_products_rejects
+    description: "Technical reject table for product records that failed validation"
+    columns:
+      - name: _reject_id
+        data_tests:
+          - not_null
+          - unique
+      - name: _reject_reason
+        data_tests:
+          - not_null

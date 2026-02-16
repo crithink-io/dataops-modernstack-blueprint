@@ -1,0 +1,125 @@
+name: dbt - CD Deploy on Merge
+
+on:
+  push:
+    branches: [main, uat, dev]
+    paths:
+      - 'dbt-project/**'
+      - '.github/workflows/dbt_cd.yml'
+
+concurrency:
+  group: dbt-cd-${{ github.ref_name }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    working-directory: dbt-project
+
+jobs:
+  dbt_deploy:
+    runs-on: ubuntu-latest
+
+    env:
+      SNOWFLAKE_ACCOUNT:      ${{ secrets.SNOWFLAKE_ACCOUNT }}
+      SNOWFLAKE_USER:         ${{ secrets.SNOWFLAKE_USER }}
+      SNOWFLAKE_PASSWORD:     ${{ secrets.SNOWFLAKE_PASSWORD }}
+      SNOWFLAKE_ROLE:         ${{ secrets.SNOWFLAKE_ROLE }}
+      SNOWFLAKE_WAREHOUSE:    ${{ secrets.SNOWFLAKE_WAREHOUSE }}
+      SNOWFLAKE_DATABASE:     ${{ secrets.SNOWFLAKE_DATABASE }}
+
+    steps:
+      # ── Setup ─────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r dbt-requirements.txt
+
+      # ── Determine target from branch ──────────────────────────
+      - name: Determine target environment
+        run: |
+          BRANCH="${{ github.ref_name }}"
+          case "$BRANCH" in
+            main)
+              echo "DBT_TARGET=prod" >> $GITHUB_ENV
+              echo "MANIFEST_ARTIFACT_NAME=dbt-manifest-prod" >> $GITHUB_ENV
+              ;;
+            uat)
+              echo "DBT_TARGET=uat" >> $GITHUB_ENV
+              echo "MANIFEST_ARTIFACT_NAME=dbt-manifest-uat" >> $GITHUB_ENV
+              ;;
+            dev)
+              echo "DBT_TARGET=dev" >> $GITHUB_ENV
+              echo "MANIFEST_ARTIFACT_NAME=dbt-manifest-dev" >> $GITHUB_ENV
+              ;;
+          esac
+
+      # ── Download previous manifest for this environment ───────
+      - name: Download previous manifest
+        continue-on-error: true
+        shell: bash
+        run: |
+          echo "Fetching artifact list for $MANIFEST_ARTIFACT_NAME..."
+          curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${{ github.repository }}/actions/artifacts?per_page=100" \
+              -o artifacts.json
+
+          artifact_id=$(grep -A10 "\"name\": \"$MANIFEST_ARTIFACT_NAME\"" artifacts.json \
+            | grep '"archive_download_url":' \
+            | head -n1 \
+            | sed 's/.*artifacts\/\([0-9]*\)\/zip.*/\1/')
+
+          if [ -z "$artifact_id" ]; then
+            echo "No previous manifest found. Will run full build."
+            echo "HAS_MANIFEST=false" >> $GITHUB_ENV
+            exit 0
+          fi
+
+          echo "Found artifact ID: $artifact_id. Downloading..."
+          curl -sL -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${{ github.repository }}/actions/artifacts/$artifact_id/zip" \
+              -o artifact.zip
+
+          unzip -q artifact.zip -d state
+          echo "HAS_MANIFEST=true" >> $GITHUB_ENV
+
+      # ── dbt steps ─────────────────────────────────────────────
+      - name: dbt deps
+        run: dbt deps --target $DBT_TARGET
+
+      # ── Source freshness check (uat/prod only) ──────────────
+      # Runs SELECT MAX(_fivetran_synced) per source table.
+      # Warns if data is stale but does not block the build.
+      # To make this a hard gate, remove continue-on-error.
+      - name: Check source freshness
+        if: env.DBT_TARGET != 'dev'
+        continue-on-error: true
+        run: dbt source freshness --target $DBT_TARGET
+
+      - name: dbt build (deploy only modified models)
+        run: |
+          if [ "$HAS_MANIFEST" = "true" ]; then
+            echo "Running incremental deploy: state:modified+"
+            dbt build -s 'state:modified+' --state ./state --target $DBT_TARGET
+          else
+            echo "No previous manifest. Running full build."
+            dbt build --target $DBT_TARGET
+          fi
+
+      # ── Upload manifest for this environment ──────────────────
+      - name: Upload manifest artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.MANIFEST_ARTIFACT_NAME }}
+          path: dbt-project/target/manifest.json
+          if-no-files-found: error
+          retention-days: 14
+          overwrite: true

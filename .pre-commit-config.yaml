@@ -1,0 +1,51 @@
+default_language_version:
+  python: python3.12
+
+repos:
+  # ── Out-of-the-box hooks ───────────────────────────────────────
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: check-added-large-files        # Prevent giant files from being committed (default 500kb)
+      - id: check-json                     # Attempts to load all json files to verify syntax
+      - id: check-merge-conflict           # Check for files that contain merge conflict strings
+      - id: check-symlinks                 # Checks for symlinks which do not point to anything
+      - id: check-yaml                     # Attempts to load all yaml files to verify syntax
+        args: ['--unsafe']                 # Allow custom dbt Jinja tags in YAML
+      - id: end-of-file-fixer             # Makes sure files end in a newline and only a newline
+      - id: no-commit-to-branch           # Protect main branch from direct commits
+        args: ['--branch', 'main']
+      - id: trailing-whitespace            # Trims trailing whitespace
+        args: ['--markdown-linebreak-ext=md']
+
+  # ── SQLFluff for dbt SQL files ─────────────────────────────────
+  - repo: https://github.com/sqlfluff/sqlfluff
+    rev: 3.3.1
+    hooks:
+      - id: sqlfluff-lint
+        name: sqlfluff-lint (dbt)
+        files: ^dbt-project/.*\.sql$
+        args: ['--config', 'dbt-project/.sqlfluff']
+        additional_dependencies:
+          - 'sqlfluff-templater-dbt>=3.0,<4.0'
+          - 'dbt-snowflake>=1.8,<2.0'
+      - id: sqlfluff-fix
+        name: sqlfluff-fix (dbt)
+        files: ^dbt-project/.*\.sql$
+        args: ['--config', 'dbt-project/.sqlfluff']
+        additional_dependencies:
+          - 'sqlfluff-templater-dbt>=3.0,<4.0'
+          - 'dbt-snowflake>=1.8,<2.0'
+
+  # ── SQLFluff for DDL SQL files ─────────────────────────────────
+  - repo: https://github.com/sqlfluff/sqlfluff
+    rev: 3.3.1
+    hooks:
+      - id: sqlfluff-lint
+        name: sqlfluff-lint (ddls)
+        files: ^ddls/.*\.sql$
+        args: ['--config', 'ddls/.sqlfluff']
+      - id: sqlfluff-fix
+        name: sqlfluff-fix (ddls)
+        files: ^ddls/.*\.sql$
+        args: ['--config', 'ddls/.sqlfluff']

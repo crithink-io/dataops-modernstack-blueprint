@@ -1,0 +1,164 @@
+# ══════════════════════════════════════════════════════════════════
+# SQLFluff Configuration — Snowflake + dbt
+# ══════════════════════════════════════════════════════════════════
+
+[sqlfluff]
+# Which SQL dialect to lint against. Must match your data warehouse.
+# Options: snowflake, bigquery, postgres, redshift, mysql, trino, etc.
+dialect = snowflake
+
+# Use "jinja" templater for dbt projects so SQLFluff understands
+# {{ ref() }}, {{ source() }}, {% if %}, etc.
+# Alternative: "dbt" templater (slower but more accurate — requires dbt installed)
+templater = jinja
+
+# Only lint files with .sql extension
+sql_file_exists = .sql
+
+# Rules to skip:
+#   ambiguous.column_count — allows SELECT * in CTEs (common in dbt staging)
+#   structure.column_order — don't enforce alphabetical column ordering
+#   ambiguous.join        — allows JOIN without explicit INNER/LEFT/etc.
+#   LT01                  — trailing whitespace (handled by pre-commit instead)
+exclude_rules = ambiguous.column_count, structure.column_order, ambiguous.join, LT01
+
+# Maximum characters per line before SQLFluff flags a violation
+# Example: a line with 130 chars → violation. 120 chars → OK.
+max_line_length = 120
+
+# ── dbt templater config ─────────────────────────────────────────
+[sqlfluff:templater:dbt]
+# Where to find dbt_project.yml (relative to where sqlfluff runs)
+project_dir = ./
+
+# ── Comma placement ──────────────────────────────────────────────
+[sqlfluff:layout:type:comma]
+# "leading" = commas at the start of each line (easier to spot missing commas)
+# "trailing" = commas at the end of each line (more traditional)
+#
+# GOOD (leading):              BAD (trailing):
+#   select                       select
+#       col_a                        col_a,
+#       , col_b                      col_b,
+#       , col_c                      col_c
+line_position = leading
+
+# ── SELECT layout ────────────────────────────────────────────────
+[sqlfluff:rules:layout.select_targets]
+# "single" = SELECT * must be on its own line, not mixed with other columns
+# "multiple" = allows SELECT *, col_a (less strict)
+wildcard_policy = single
+
+# ── Jinja spacing ────────────────────────────────────────────────
+[sqlfluff:rules:jinja.padding]
+# Enforce single space inside Jinja tags
+# GOOD: {{ ref('model') }}     BAD: {{ref('model')}} or {{  ref('model')  }}
+single_space = true
+
+# ── Indentation ──────────────────────────────────────────────────
+[sqlfluff:indentation]
+# Allow some implicit indentation patterns without flagging them
+allow_implicit_indents = True
+
+# Don't indent JOIN to be inside FROM
+# GOOD:                        BAD (if True):
+#   from orders as ord            from orders as ord
+#   join customers as cust            join customers as cust
+indented_joins = False
+
+# Indent ON/USING clause under JOIN
+# GOOD:                        BAD (if False):
+#   join customers as cust      join customers as cust
+#       on ord.id = cust.id     on ord.id = cust.id
+indented_using_on = True
+
+# Indent content inside {% if %}...{% endif %} blocks
+template_blocks_indent = True
+
+# Don't indent the conditions inside ON clause
+# GOOD:                        BAD (if True):
+#   on ord.id = cust.id            on
+#                                       ord.id = cust.id
+indented_on_contents = False
+
+# Indent CTE body inside WITH...AS (
+# GOOD:                        BAD (if False):
+#   with cte as (               with cte as (
+#       select ...              select ...
+#   )                           )
+indented_ctes = True
+
+# Indent THEN inside CASE/WHEN
+# GOOD:                        BAD (if False):
+#   case                        case
+#       when x = 1              when x = 1
+#           then 'a'            then 'a'
+indented_then = True
+
+# ── Templater behavior ───────────────────────────────────────────
+[sqlfluff:templater]
+# Unwrap queries that are wrapped in extra parentheses by the templater
+unwrap_wrapped_queries = True
+
+# ── General rules ────────────────────────────────────────────────
+[sqlfluff:rules]
+# Allow scalar subqueries (SELECT (SELECT count(*) FROM ...))
+allow_scalar = True
+
+# Table references must be consistent — either always qualified or never
+# GOOD: orders.id, orders.name  BAD: orders.id, name (mixing qualified/unqualified)
+single_table_references = consistent
+
+# All identifiers should be unquoted (Snowflake doesn't need quotes for standard names)
+# GOOD: select col_a            BAD: select "col_a"
+unquoted_identifiers_policy = all
+
+# Redundant disable (also in exclude_rules above, but explicit here too)
+LT01 = disable
+
+# ── Capitalisation rules ─────────────────────────────────────────
+# All enforce lowercase for consistency and readability
+
+[sqlfluff:rules:capitalisation.keywords]
+# SQL keywords: select, from, where, join, on, group by, order by, etc.
+# GOOD: select ... from ...     BAD: SELECT ... FROM ...
+capitalisation_policy = lower
+
+[sqlfluff:rules:capitalisation.identifiers]
+# Column and table names
+# GOOD: customer_id             BAD: Customer_ID or CUSTOMER_ID
+capitalisation_policy = lower
+
+[sqlfluff:rules:capitalisation.functions]
+# SQL functions: count(), sum(), coalesce(), nvl(), etc.
+# GOOD: count(*)                BAD: COUNT(*) or Count(*)
+capitalisation_policy = lower
+# Extended covers Snowflake-specific functions: flatten(), parse_json(), etc.
+extended_capitalisation_policy = lower
+
+[sqlfluff:rules:capitalisation.literals]
+# Literal values: null, true, false
+# GOOD: where col is null       BAD: where col IS NULL
+capitalisation_policy = lower
+
+[sqlfluff:rules:capitalisation.types]
+# Data types: varchar, integer, timestamp, boolean, etc.
+# GOOD: cast(col as varchar)    BAD: cast(col as VARCHAR)
+extended_capitalisation_policy = lower
+
+# ── Aliasing rules ───────────────────────────────────────────────
+
+[sqlfluff:rules:aliasing.table]
+# Tables must use explicit AS keyword
+# GOOD: from orders as ord      BAD: from orders ord
+aliasing = explicit
+
+[sqlfluff:rules:aliasing.column]
+# Columns must use explicit AS keyword
+# GOOD: count(*) as total       BAD: count(*) total
+aliasing = explicit
+
+[sqlfluff:rules:aliasing.length]
+# Aliases must be at least 3 characters (prevents meaningless aliases)
+# GOOD: orders as ord           BAD: orders as o
+min_alias_length = 3

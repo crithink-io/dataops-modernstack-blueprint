@@ -1,0 +1,31 @@
+version: 2
+
+sources:
+  - name: fivetran_raw
+    description: "Raw application data loaded by Fivetran into Snowflake"
+    database: "{{ env_var('SNOWFLAKE_DATABASE', '') }}"
+    schema: raw
+
+    # Source freshness: runs SELECT MAX(_FIVETRAN_SYNCED) per table.
+    # Warns if data is >12h old, errors if >24h old.
+    # Only meaningful in uat/prod (seeds in dev won't have this column).
+    # Customize loaded_at_field if your ingestion tool uses a different column.
+    # Run manually: dbt source freshness --target <target>
+    freshness:
+      warn_after:
+        count: 12
+        period: hour
+      error_after:
+        count: 24
+        period: hour
+    loaded_at_field: _fivetran_synced
+
+    tables:
+      - name: customers
+        description: "Raw customers table synced by Fivetran"
+      - name: orders
+        description: "Raw orders table synced by Fivetran"
+      - name: order_items
+        description: "Raw order items table synced by Fivetran"
+      - name: products
+        description: "Raw products table synced by Fivetran"

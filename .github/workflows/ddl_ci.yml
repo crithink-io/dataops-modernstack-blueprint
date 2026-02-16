@@ -1,0 +1,104 @@
+name: DDL - Validate on PR
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [main, uat, dev]
+    paths:
+      - 'ddls/**'
+      - '.github/workflows/ddl_ci.yml'
+
+concurrency:
+  group: ddl-ci-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  # ── Lint: SQLFluff validation on DDL SQL files ──────────────────
+  ddl_lint:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install SQLFluff
+        run: pip install 'sqlfluff>=3.0,<4.0'
+
+      - name: SQLFluff lint DDLs
+        working-directory: ddls
+        run: sqlfluff lint .
+
+  # ── Validate: Dry-run changed DDLs against Snowflake ───────────
+  ddl_validate:
+    needs: ddl_lint
+    runs-on: ubuntu-latest
+
+    env:
+      SNOWFLAKE_ACCOUNT:   ${{ secrets.SNOWFLAKE_ACCOUNT }}
+      SNOWFLAKE_USER:      ${{ secrets.SNOWFLAKE_USER }}
+      SNOWFLAKE_PASSWORD:  ${{ secrets.SNOWFLAKE_PASSWORD }}
+      SNOWFLAKE_ROLE:      ${{ secrets.SNOWFLAKE_ROLE }}
+      SNOWFLAKE_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install SnowSQL
+        run: |
+          curl -o snowsql.bash https://sfc-repo.snowflakecomputing.com/snowsql/bootstrap/1.3/linux_x86_64/snowsql-1.3.2-linux_x86_64.bash
+          SNOWSQL_DEST=~/bin SNOWSQL_LOGIN_SHELL=~/.profile bash snowsql.bash
+          echo "$HOME/bin" >> $GITHUB_PATH
+
+      - name: Detect changed DDL files
+        id: changed
+        run: |
+          CHANGED=$(git diff --name-only --diff-filter=ACMR origin/${{ github.event.pull_request.base.ref }}...HEAD -- ddls/ | grep '\.sql$' || true)
+          echo "files<<EOF" >> $GITHUB_OUTPUT
+          echo "$CHANGED" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          if [ -z "$CHANGED" ]; then
+            echo "No DDL SQL files changed."
+          else
+            echo "Changed DDL files:"
+            echo "$CHANGED"
+          fi
+
+      - name: Validate DDL syntax
+        if: steps.changed.outputs.files != ''
+        run: |
+          echo "Validating changed DDL files..."
+          ERRORS=0
+          while IFS= read -r file; do
+            [ -z "$file" ] && continue
+            echo "--- Validating: $file"
+            # Use EXPLAIN to check syntax without executing
+            if ! snowsql \
+              --accountname "$SNOWFLAKE_ACCOUNT" \
+              --username "$SNOWFLAKE_USER" \
+              --dbname "_DB_UTILS" \
+              --schemaname "PUBLIC" \
+              --query "EXPLAIN USING TEXT $(cat "$file")" \
+              --option exit_on_error=true \
+              --option friendly=false \
+              --option timing=false \
+              --option output_format=plain 2>&1; then
+              echo "FAILED: $file"
+              ERRORS=$((ERRORS + 1))
+            else
+              echo "OK: $file"
+            fi
+          done <<< "${{ steps.changed.outputs.files }}"
+          if [ "$ERRORS" -gt 0 ]; then
+            echo "$ERRORS DDL file(s) failed validation."
+            exit 1
+          fi
+          echo "All DDL files validated successfully."

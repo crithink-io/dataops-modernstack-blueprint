@@ -1,0 +1,15 @@
+# dbt artifacts (inside dbt-project/)
+dbt-project/target/
+dbt-project/dbt_packages/
+dbt-project/logs/
+dbt-project/.user.yml
+dbt-project/package-lock.yml
+
+# Python
+venv/
+
+# OS
+*.DS_Store
+
+# Linting
+.sqlfluff_cache/

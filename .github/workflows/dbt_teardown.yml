@@ -1,0 +1,52 @@
+name: dbt - Teardown PR Schema
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main, uat, dev]
+
+defaults:
+  run:
+    working-directory: dbt-project
+
+jobs:
+  teardown:
+    runs-on: ubuntu-latest
+
+    env:
+      SNOWFLAKE_ACCOUNT:      ${{ secrets.SNOWFLAKE_ACCOUNT }}
+      SNOWFLAKE_USER:         ${{ secrets.SNOWFLAKE_USER }}
+      SNOWFLAKE_PASSWORD:     ${{ secrets.SNOWFLAKE_PASSWORD }}
+      SNOWFLAKE_ROLE:         ${{ secrets.SNOWFLAKE_ROLE }}
+      SNOWFLAKE_WAREHOUSE:    ${{ secrets.SNOWFLAKE_WAREHOUSE }}
+      SNOWFLAKE_DATABASE:     ${{ secrets.SNOWFLAKE_DATABASE }}
+      SNOWFLAKE_CI_DATABASE:  ${{ secrets.SNOWFLAKE_CI_DATABASE }}
+      DBT_TARGET: ci
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r dbt-requirements.txt
+
+      - name: Generate Schema ID
+        run: |
+          SCHEMA_ID="${{ github.event.pull_request.number }}__$(echo ${{ github.event.pull_request.head.sha }} | cut -c1-7 | tr '[:lower:]' '[:upper:]')"
+          echo "SCHEMA_ID=$SCHEMA_ID" >> $GITHUB_ENV
+
+      - name: dbt deps
+        run: dbt deps --target $DBT_TARGET --vars "schema_id: $SCHEMA_ID"
+
+      - name: Drop PR schema in _db_utils
+        run: |
+          dbt run-operation drop_pr_schemas \
+            --target $DBT_TARGET \
+            --args "{pr_schema_name: 'PR_$SCHEMA_ID'}" \
+            --vars "schema_id: $SCHEMA_ID"

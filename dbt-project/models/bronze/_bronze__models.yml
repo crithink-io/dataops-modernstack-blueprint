@@ -1,0 +1,67 @@
+version: 2
+
+models:
+  - name: brz_customers
+    description: "Bronze immutable store for customer data. Append-only, tagged with metadata."
+    columns:
+      - name: _bronze_sk
+        description: "Surrogate key for bronze record (customer_id + batch)"
+        data_tests:
+          - not_null
+          - unique
+      - name: customer_id
+        description: "Source customer identifier"
+        data_tests:
+          - not_null
+      - name: _source_system
+        data_tests:
+          - not_null
+          - accepted_values:
+              values: ['fivetran']
+      - name: _sensitivity_tag
+        data_tests:
+          - not_null
+          - accepted_values:
+              values: ['pii', 'public', 'confidential']
+
+  - name: brz_orders
+    description: "Bronze immutable store for order data. Append-only, tagged."
+    columns:
+      - name: _bronze_sk
+        data_tests:
+          - not_null
+          - unique
+      - name: order_id
+        data_tests:
+          - not_null
+      - name: _source_system
+        data_tests:
+          - not_null
+
+  - name: brz_order_items
+    description: "Bronze immutable store for order item data. Append-only, tagged."
+    columns:
+      - name: _bronze_sk
+        data_tests:
+          - not_null
+          - unique
+      - name: order_item_id
+        data_tests:
+          - not_null
+      - name: _source_system
+        data_tests:
+          - not_null
+
+  - name: brz_products
+    description: "Bronze immutable store for product data. Append-only, tagged."
+    columns:
+      - name: _bronze_sk
+        data_tests:
+          - not_null
+          - unique
+      - name: product_id
+        data_tests:
+          - not_null
+      - name: _source_system
+        data_tests:
+          - not_null

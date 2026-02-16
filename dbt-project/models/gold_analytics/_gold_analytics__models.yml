@@ -1,0 +1,50 @@
+version: 2
+
+models:
+  - name: agg_sales_by_customer
+    description: "Pre-aggregated customer sales metrics for Power BI consumption"
+    columns:
+      - name: customer_id
+        description: "Primary key"
+        data_tests:
+          - not_null
+          - unique
+      - name: customer_tier
+        data_tests:
+          - not_null
+      - name: total_orders
+        data_tests:
+          - not_null
+      - name: total_spent
+        data_tests:
+          - not_null
+
+  - name: agg_sales_by_product
+    description: "Pre-aggregated product sales metrics for Power BI consumption"
+    columns:
+      - name: product_id
+        description: "Primary key"
+        data_tests:
+          - not_null
+          - unique
+      - name: performance_category
+        data_tests:
+          - not_null
+      - name: total_revenue
+        data_tests:
+          - not_null
+
+  - name: agg_daily_revenue
+    description: "Daily revenue aggregation for Power BI dashboards"
+    columns:
+      - name: order_date
+        description: "Primary key (one row per day)"
+        data_tests:
+          - not_null
+          - unique
+      - name: total_revenue
+        data_tests:
+          - not_null
+      - name: total_orders
+        data_tests:
+          - not_null

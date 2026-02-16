@@ -1,0 +1,124 @@
+# Maintainer: Anouar Zbaida
+# Multi-zone medallion architecture: Transient → Bronze → Silver → Gold → Gold Analytics
+
+name: 'ci_cd_project'
+version: '1.0.0'
+
+# Which profile to use from profiles.yml (defines Snowflake connection)
+profile: 'snowflake'
+
+# ── Standard dbt paths ───────────────────────────────────────────
+model-paths: ["models"]
+analysis-paths: ["analyses"]
+test-paths: ["tests"]
+seed-paths: ["seeds"]
+macro-paths: ["macros"]
+snapshot-paths: ["snapshots"]
+
+# Folders deleted by `dbt clean`
+clean-targets:
+  - "target"
+  - "dbt_packages"
+
+# Global variables accessible via {{ var('schema_id') }} in any model/macro
+vars:
+  schema_id: ''
+
+# ── Zone-level model configuration ──────────────────────────────
+#
+# The "+" prefix means "this is a CONFIG property, not a subfolder".
+# Without "+", dbt would look for a folder named "materialized/" or "schema/".
+#
+# Tags are a dbt-only concept — they do NOT appear in Snowflake.
+# They let you run/test by zone:
+#   dbt run --select tag:zone:bronze
+#   dbt test --select tag:zone:silver
+# Tags apply to the model node, not to individual SQL queries inside it.
+#
+# Materialization types:
+#   table       — DROP + CREATE TABLE every run. Full rebuild. Simple, predictable.
+#   incremental — Only process NEW/CHANGED rows. Keeps existing data. Faster for large tables.
+#   ephemeral   — No table in Snowflake. SQL is inlined as a CTE into referencing models.
+#   view        — Creates a SQL VIEW (no data stored, query runs on read).
+#
+models:
+  ci_cd_project:
+
+    # TRANSIENT: Landing zone. Truncate & reload every run.
+    # "table" because we want to fully replace data each run (drop + recreate).
+    transient:
+      +materialized: table
+      +schema: transient
+      +tags: ['zone:transient']
+
+    # BRONZE: Append-only raw history. Never deletes old rows.
+    # "incremental" so each run only ADDS new rows from transient.
+    bronze:
+      +materialized: incremental
+      +schema: bronze
+      +tags: ['zone:bronze']
+
+    # SILVER: Cleaned, deduplicated, business-validated data.
+    # "table" because we apply transformations (dedup, standardize) — full rebuild
+    # ensures consistency. Data volume at this layer is manageable.
+    silver:
+      +materialized: table
+      +schema: silver
+      +tags: ['zone:silver']
+
+      # _validated/ subfolder: Shared validation logic (dedup + business rules).
+      # "ephemeral" because this is intermediate SQL reused by both:
+      #   - slv_customers.sql (clean rows: _is_valid = true)
+      #   - slv_customers_rejects.sql (rejected rows: _is_valid = false)
+      # No table created in Snowflake — the SQL is injected as a CTE.
+      # This avoids duplicating validation logic (DRY principle).
+      _validated:
+        +materialized: ephemeral
+
+    # GOLD: Star schema — dimensions + facts with business rules.
+    # "table" for predictable, fast BI queries.
+    gold:
+      +materialized: table
+      +schema: gold
+      +tags: ['zone:gold']
+
+    # GOLD ANALYTICS: Pre-aggregated models for BI dashboards.
+    # "table" so dashboards read from pre-computed aggregations.
+    gold_analytics:
+      +materialized: table
+      +schema: gold_analytics
+      +tags: ['zone:gold_analytics']
+
+  # ── dbt_project_evaluator package ────────────────────────────
+  # This package audits your dbt project for best practices (naming,
+  # structure, test coverage, etc.). Disabled by default to avoid
+  # unnecessary compute in CI/CD. Enable with:
+  #   export ENABLE_DBT_PROJECT_EVALUATOR=true
+  dbt_project_evaluator:
+    +enabled: "{{ env_var('ENABLE_DBT_PROJECT_EVALUATOR', 'false') | lower == 'true' | as_bool }}"
+
+# ── Snapshots ────────────────────────────────────────────────────
+# Tagged as zone:bronze because snapshots track raw change history
+# (SCD Type 2), which is a bronze-level concern — preserving every
+# version of a record over time.
+# The actual target_schema is defined inside each snapshot file.
+snapshots:
+  ci_cd_project:
+    +tags: ['zone:bronze']
+
+# ── Package-level configs ────────────────────────────────────────
+# These settings apply to the dbt_project_evaluator PACKAGE, not your project.
+# They control how the evaluator behaves when enabled.
+
+data_tests:
+  dbt_project_evaluator:
+    # When evaluator tests find issues, should they:
+    #   "warn"  — log a warning but don't fail the build (non-blocking)
+    #   "error" — fail the build (blocking)
+    +severity: "{{ env_var('DBT_PROJECT_EVALUATOR_SEVERITY', 'warn') }}"
+
+seeds:
+  dbt_project_evaluator:
+    # The evaluator package ships its own seed data (reference tables).
+    # Only load if the evaluator is enabled.
+    +enabled: "{{ env_var('ENABLE_DBT_PROJECT_EVALUATOR', 'false') | lower == 'true' | as_bool }}"

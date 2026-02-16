@@ -1,0 +1,124 @@
+version: 2
+
+models:
+  - name: slv_customers
+    description: "Silver cleaned, deduplicated, standardized customer data"
+    columns:
+      - name: customer_id
+        description: "Primary key for customers"
+        data_tests:
+          - not_null
+          - unique
+      - name: email
+        description: "Standardized email (lowercase)"
+        data_tests:
+          - not_null
+          - unique
+      - name: first_name
+        data_tests:
+          - not_null
+      - name: last_name
+        data_tests:
+          - not_null
+      - name: state_code
+        description: "Standardized state code (uppercase)"
+        data_tests:
+          - not_null
+      - name: country_code
+        description: "Standardized country code (uppercase)"
+        data_tests:
+          - not_null
+
+  - name: slv_orders
+    description: "Silver cleaned, deduplicated, standardized order data"
+    columns:
+      - name: order_id
+        data_tests:
+          - not_null
+          - unique
+      - name: customer_id
+        data_tests:
+          - not_null
+          - relationships:
+              to: ref('slv_customers')
+              field: customer_id
+      - name: total_amount
+        data_tests:
+          - not_null
+      - name: status
+        data_tests:
+          - not_null
+          - accepted_values:
+              values: ['COMPLETED', 'SHIPPED', 'PROCESSING', 'CANCELLED', 'PENDING']
+
+  - name: slv_order_items
+    description: "Silver cleaned, deduplicated, standardized order items data"
+    columns:
+      - name: order_item_id
+        data_tests:
+          - not_null
+          - unique
+      - name: order_id
+        data_tests:
+          - not_null
+          - relationships:
+              to: ref('slv_orders')
+              field: order_id
+      - name: product_id
+        data_tests:
+          - not_null
+          - relationships:
+              to: ref('slv_products')
+              field: product_id
+      - name: quantity
+        data_tests:
+          - not_null
+
+  - name: slv_products
+    description: "Silver cleaned, deduplicated, standardized product data"
+    columns:
+      - name: product_id
+        data_tests:
+          - not_null
+          - unique
+      - name: price
+        data_tests:
+          - not_null
+      - name: cost
+        data_tests:
+          - not_null
+
+  - name: slv_customers_rejects
+    description: "Business reject table for customer records"
+    columns:
+      - name: _reject_id
+        data_tests:
+          - not_null
+          - unique
+      - name: _reject_reason
+        data_tests:
+          - not_null
+
+  - name: slv_orders_rejects
+    description: "Business reject table for order records"
+    columns:
+      - name: _reject_id
+        data_tests:
+          - not_null
+          - unique
+
+  - name: slv_order_items_rejects
+    description: "Business reject table for order item records"
+    columns:
+      - name: _reject_id
+        data_tests:
+          - not_null
+          - unique
+
+  - name: slv_products_rejects
+    description: "Business reject table for product records"
+    columns:
+      - name: _reject_id
+        data_tests:
+          - not_null
+          - unique
