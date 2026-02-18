@@ -1,6 +1,35 @@
-# dbt-workflow
+<div align="center">
 
-**Maintainer:** Anouar Zbaida | **Stack:** dbt + Snowflake + GitHub Actions
+# dataops-modernstack-blueprint
+
+**A production-ready DataOps template for Snowflake + dbt + GitHub Actions**
+
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
+[![dbt](https://img.shields.io/badge/dbt-1.9+-FF694B.svg)](https://www.getdbt.com/)
+[![Snowflake](https://img.shields.io/badge/Snowflake-powered-29B5E8.svg)](https://www.snowflake.com/)
+
+*Clone. Init. Ship to production.*
+
+</div>
+
+---
+
+## Why this template?
+
+Starting a Snowflake data platform from scratch means wiring together dbt, CI/CD, DDL management, data quality, environments, and Git workflows — before writing a single model. This template gives you all of that out of the box.
+
+**What you get:**
+
+| Component | What's included |
+|-----------|----------------|
+| **dbt project** | 5-zone medallion architecture (transient/bronze/silver/gold/gold_analytics), two-stage reject tables, ephemeral validation, snapshots |
+| **DDL management** | Folder-per-object hierarchy, `CREATE OR ALTER` for grant preservation, automated deploy in dependency order |
+| **CI/CD pipelines** | 5 GitHub Actions workflows — lint gates, slim CI with PR-isolated schemas, incremental CD, teardown, source freshness checks |
+| **Git workflow** | Feature promotion strategy — each feature merges independently to dev/uat/main, no forced batch deployments |
+| **Data quality** | Technical + business reject tables, schema tests on all keys, row count validation macros |
+| **Init script** | One command to customize project name, database names, warehouse, Git remote — ready to develop |
+| **Best practices** | Comprehensive guide covering materializations, anti-patterns, incremental strategies, Snowflake limitations |
 
 ---
 
@@ -40,6 +69,8 @@
 - [Developer Quick-Start](#developer-quick-start)
 - [Environment Variables](#environment-variables)
 - [Best Practices](#best-practices)
+- [Contributing](#contributing)
+- [License](#license)
 
 ---
 
@@ -152,7 +183,7 @@ The `_DB_UTILS` database serves as the **Common Zone** and exists because:
 ## Project Structure
 
 ```
-dbt-workflow/                                  # Repo root
+dataops-modernstack-blueprint/                 # Repo root
 │
 ├── dbt-project/                               # ── dbt models & config ──
 │   ├── dbt_project.yml                        # Project configuration
@@ -817,4 +848,26 @@ git push -u origin feature/my-change
 
 ---
 
-**Maintained by Anouar Zbaida | Crithink**
+## Contributing
+
+Contributions are welcome! Whether it's fixing a bug, improving documentation, or adding a new pattern — we appreciate it.
+
+Please read [CONTRIBUTING.md](CONTRIBUTING.md) before submitting a pull request.
+
+---
+
+## License
+
+This project is licensed under the **Apache License 2.0** — see the [LICENSE](LICENSE) file for details.
+
+You are free to use this template for personal and commercial projects. Attribution is appreciated but not required.
+
+---
+
+<div align="center">
+
+**Built and maintained by [Anouar Zbaida](https://github.com/anoru) | [Crithink](https://github.com/crithink-io)**
+
+If this template saved you time, give it a star!
+
+</div>
