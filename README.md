@@ -252,6 +252,10 @@ dataops-modernstack-blueprint/                 # Repo root
 ├── scripts/
 │   └── init_project.py                        # Project initializer (customize names)
 │
+├── .vscode/
+│   ├── settings.json                          # SQLFluff format-on-save, dbt Power User config
+│   └── extensions.json                        # Recommended VS Code extensions
+│
 ├── .pre-commit-config.yaml                    # Pre-commit hooks (both folders)
 ├── .gitignore
 ├── README.md
@@ -672,11 +676,14 @@ Located at `ddls/_DB_UTILS/PUBLIC/procedures/clone_for_ci.sql`. Deployed automat
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `SOURCE_DB` | VARCHAR | Source database (e.g. `APP_DB_DEV`) |
-| `SCHEMA_LIST` | VARCHAR | Comma-separated schemas (e.g. `TRANSIENT,BRONZE,SILVER,GOLD,GOLD_ANALYTICS`) |
+| `SCHEMA_LIST` | VARCHAR | Comma-separated schemas — used when `TABLE_LIST='*'` |
 | `TARGET_SCHEMA` | VARCHAR | PR schema name (e.g. `PR_42__A1B2C3D`) |
 | `ENV_TYPE` | VARCHAR | Environment: `dev`, `uat`, or `prod` |
 | `SAMPLE_PCT` | NUMBER | 0 = full zero-copy clone, >0 = CTAS with SAMPLE(n) |
 | `ROLE_NAME` | VARCHAR | Masked-data role for PII protection |
+| `TABLE_LIST` | VARCHAR | `'*'` = clone all tables (default). Or `'SCHEMA.TABLE,...'` to clone only specific tables (slim mode) |
+
+**Slim clone:** The CI workflow automatically detects which tables are modified via `dbt ls --select state:modified+`, then passes only those tables to the procedure. If `dim_customers` changes, only `GOLD.DIM_CUSTOMERS` is cloned — not the entire GOLD schema. Unmodified upstream tables are read from production via `--defer`.
 
 **Clone strategy by environment:**
 
@@ -692,20 +699,60 @@ Located at `ddls/_DB_UTILS/PUBLIC/procedures/clone_for_ci.sql`. Deployed automat
 
 Tests are defined per zone in `_<zone>__models.yml` files.
 
-| Layer | Test Types | Zone |
-|-------|-----------|------|
-| **Base** | `not_null`, `unique` on PKs | All zones |
-| **Integrity** | `relationships` between models | Silver, Gold |
-| **Business** | `accepted_values` for enums | Silver, Gold |
-| **Quality** | Reject tables, row counts | Transient, Silver |
-| **SCD** | Snapshot tracking | Bronze |
+| Layer | Test Type | Zone | What It Checks |
+|-------|-----------|------|----------------|
+| **Base** | `not_null`, `unique` | All zones | Every primary key is present and unique |
+| **Integrity** | `relationships` | Silver, Gold | Every FK value exists in the referenced table |
+| **Business** | `accepted_values` | Silver, Gold | Enum columns only contain expected values |
+| **Statistical** | `dbt_expectations` | Gold, Gold Analytics | Numeric ranges, regex patterns, row count bounds |
+| **Quality** | Reject tables, row counts | Transient, Silver | Bad data is captured, not silently dropped |
+| **SCD** | Snapshot tracking | Bronze | Historical changes are recorded correctly |
+| **Contract** | Column types enforced | Gold | Every column has the declared data type |
+
+### dbt-expectations (Statistical Tests)
+
+The `calogica/dbt_expectations` package (already in `packages.yml`) provides advanced tests beyond what dbt ships with. Applied to the gold layer:
+
+```yaml
+- name: unit_price
+  data_tests:
+    - dbt_expectations.expect_column_values_to_be_between:
+        min_value: 0
+        strictly: true   # must be > 0, not >= 0
+
+- name: email
+  data_tests:
+    - dbt_expectations.expect_column_values_to_match_regex:
+        regex: '^[^@\s]+@[^@\s]+\.[^@\s]+$'
+        # Fails if any email doesn't look like user@domain.com
+```
+
+### Model Contracts (Type Safety)
+
+Gold models use **dbt contracts** — a declaration that the model will always produce specific columns with specific types. If the model's output doesn't match, the build fails *before* touching production.
+
+```yaml
+- name: dim_customers
+  config:
+    contract:
+      enforced: true   # dbt generates typed DDL; no CAST added to your SQL
+  columns:
+    - name: customer_id
+      data_type: integer
+    - name: total_spent
+      data_type: float
+```
+
+dbt generates `CREATE TABLE (customer_id INTEGER, total_spent FLOAT, ...) AS SELECT ...` — Snowflake enforces types at DDL level. Zero runtime overhead.
 
 **CI testing flow:**
 1. PR opened → SQLFluff lint validates all SQL files
-2. Lint passes → CI clones data to PR schema
-3. `dbt build` runs models + tests on `state:modified+`
-4. All lint checks and tests must pass before merge is allowed
-5. After merge → CD deploys to target environment
+2. Lint passes → `dbt source freshness` checks source data is not stale (uat/prod only)
+3. CI detects which tables are modified via `dbt ls` → clones only those tables
+4. `dbt build` runs models + tests on `state:modified+` (slim CI)
+5. Contracts validate column types, dbt-expectations validates value ranges
+6. All checks must pass before merge is allowed
+7. After merge → CD deploys to target environment, uploads new manifest
 
 ---
 
@@ -724,6 +771,19 @@ python scripts/init_project.py
 ```
 
 The init script prompts for project name, author, Snowflake database names, and warehouse name, then replaces all template values across the codebase (including renaming DDL directories). It also offers to update the Git remote origin to your new repo and push an initial commit.
+
+### VS Code Setup (Recommended)
+
+Open the repo in VS Code. You will be prompted to install the recommended extensions — accept. They are defined in [.vscode/extensions.json](.vscode/extensions.json):
+
+| Extension | What it does |
+|-----------|-------------|
+| **SQLFluff** (`dorzey.vscode-sqlfluff`) | Lints and **auto-formats SQL on save**. Uses the nearest `.sqlfluff` config automatically — jinja templater for dbt files, raw templater for DDL files. |
+| **dbt Power User** (`innoverio.vscode-dbt-power-user`) | Autocomplete, model preview, lineage graph, compiled SQL — all inside VS Code |
+| **Jinja HTML** (`samuelcolvin.jinjahtml`) | Syntax highlighting for `.sql` files that contain Jinja (`{{ ref() }}`, `{% if %}`) |
+| **YAML** (`redhat.vscode-yaml`) | Validates `.yml` schema files as you type |
+
+Format-on-save is enabled by default in [.vscode/settings.json](.vscode/settings.json). After every save, SQLFluff automatically reformats your SQL according to the project's style rules — no manual `sqlfluff fix` needed.
 
 ### Setup
 

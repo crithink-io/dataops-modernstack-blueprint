@@ -28,6 +28,11 @@ This project is intended as a **best-practice template** for dbt on Snowflake wi
 | **SQL linting** | `dbt-project/.sqlfluff`, `ddls/.sqlfluff`, `.pre-commit-config.yaml` | Dual SQLFluff configs — jinja for dbt, raw for DDLs. Pre-commit + CI enforcement. |
 | **Feature promotion Git workflow** | README.md § Git Workflow | Branch from `main`, PR to each env independently. Selective releases, no cherry-picking. |
 | **Branch protection** | `.github/branch-protection.md` | Stale PR protection, required status checks documentation. |
+| **Source freshness monitoring** | `dbt-project/models/transient/_transient__sources.yml`, `dbt_ci.yml`, `dbt_cd.yml` | Warns if Fivetran hasn't synced in 12h, errors at 24h. Runs before every build as a pre-gate. |
+| **dbt model contracts** | `dbt-project/models/gold/_gold__models.yml` | Gold models declare every column with its data type. dbt enforces the schema before any data is written. |
+| **dbt-expectations tests** | `dbt-project/models/gold/`, `dbt-project/models/gold_analytics/` | Statistical tests: value ranges, regex patterns, minimum row counts. Applied to gold layer. |
+| **Smart CI clone (table-level)** | `dbt_ci.yml`, `clone_for_ci` macro, `CLONE_FOR_CI` procedure | CI detects exactly which tables are modified and clones only those — not entire schemas. |
+| **VS Code developer setup** | `.vscode/settings.json`, `.vscode/extensions.json` | SQLFluff format-on-save, dbt Power User, Jinja syntax. Open in VS Code to get prompted for install. |
 | **Analyses** | `dbt-project/analyses/` | Placeholder for ad-hoc SQL (e.g. `dbt compile` then run in Snowflake). |
 
 ---
@@ -45,23 +50,29 @@ This project is intended as a **best-practice template** for dbt on Snowflake wi
    ```
    This replaces all template values (project name, database names, warehouse, author) across the entire codebase, renames DDL directories, and optionally updates the Git remote origin to your new repo with an initial commit + push.
 
-3. **Set Snowflake credentials (env vars)**
+3. **Open in VS Code** (optional but recommended)
+   ```bash
+   code .
+   ```
+   VS Code will prompt you to install recommended extensions (SQLFluff, dbt Power User, Jinja HTML, YAML). Accept. After install, SQL files auto-format on save using the project's SQLFluff rules.
+
+5. **Set Snowflake credentials (env vars)**
    - Required: `SNOWFLAKE_ACCOUNT`, `SNOWFLAKE_USER`, `SNOWFLAKE_PASSWORD`, `SNOWFLAKE_ROLE`, `SNOWFLAKE_WAREHOUSE`, `SNOWFLAKE_DATABASE`
    - Per-environment (optional): `SNOWFLAKE_DATABASE_DEV`, `SNOWFLAKE_DATABASE_UAT`, `SNOWFLAKE_DATABASE_PROD`
    - For CI: add the same vars as GitHub repo Secrets, plus `SNOWFLAKE_CI_DATABASE` and `SNOWFLAKE_CI_ROLE`.
 
-4. **Set up Python environment**
+6. **Set up Python environment**
    ```bash
    python -m venv venv && source venv/bin/activate
    pip install -r dbt-project/dbt-requirements.txt
    ```
 
-5. **Set up pre-commit hooks**
+7. **Set up pre-commit hooks**
    ```bash
    pre-commit install
    ```
 
-6. **Install and run dbt**
+8. **Install and run dbt**
    ```bash
    cd dbt-project
    dbt deps
@@ -69,7 +80,7 @@ This project is intended as a **best-practice template** for dbt on Snowflake wi
    dbt build
    ```
 
-7. **Optional: dbt docs**
+9. **Optional: dbt docs**
    ```bash
    dbt docs generate && dbt docs serve
    ```
@@ -187,8 +198,12 @@ git checkout dev && git reset --hard main && git push --force origin dev
 ## CI/CD (GitHub Actions)
 
 ### dbt Workflows (trigger on `dbt-project/**` changes)
-- **CI (`dbt_ci.yml`):** On PR to `dev`, `uat`, or `main` — lints SQL, clones data into an isolated PR schema in `_DB_UTILS`, runs `dbt build -s 'state:modified+' --defer` for slim CI.
-- **CD (`dbt_cd.yml`):** On push (merge) to `dev`, `uat`, or `main` — runs `dbt build -s 'state:modified+'` to the target environment and uploads the new manifest artifact.
+- **CI (`dbt_ci.yml`):** On PR to `dev`, `uat`, or `main`:
+  1. **Lint** — SQLFluff checks all SQL files. Fails fast if any rule is broken.
+  2. **Freshness** (uat/prod only) — `dbt source freshness` checks that Fivetran has synced recently. Warns if data is >12h old, errors at >24h.
+  3. **Smart clone** — `dbt ls state:modified+` detects exactly which models changed. Only those specific tables are cloned into the PR schema (not entire schemas). If only `dim_customers` changed, only `GOLD.DIM_CUSTOMERS` is cloned.
+  4. **Build** — `dbt build -s 'state:modified+' --defer` builds modified models and their downstream, reads unmodified upstream from production.
+- **CD (`dbt_cd.yml`):** On push (merge) to `dev`, `uat`, or `main` — checks freshness, runs `dbt build -s 'state:modified+'` to the target environment, uploads the new manifest artifact.
 - **Teardown (`dbt_teardown.yml`):** On PR close — drops the PR schema via `drop_pr_schemas` macro.
 
 ### DDL Workflows (trigger on `ddls/**` changes)
@@ -261,6 +276,10 @@ dbt-workflow/
 ├── .github/
 │   ├── workflows/                   # dbt + DDL CI/CD workflows
 │   └── branch-protection.md         # GitHub settings documentation
+│
+├── .vscode/
+│   ├── settings.json                # SQLFluff format-on-save, dbt Power User path
+│   └── extensions.json              # Recommended extensions (auto-prompted on open)
 │
 ├── scripts/
 │   └── init_project.py              # Template initializer (customize names)

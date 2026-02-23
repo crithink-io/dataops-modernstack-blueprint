@@ -18,6 +18,8 @@
 9. [Deployment and Scaling](#9-deployment-and-scaling)
 10. [Snowflake-Specific Limitations](#10-snowflake-specific-limitations)
 11. [dbt Ecosystem: Core, Cloud, and Fusion](#11-dbt-ecosystem-core-cloud-and-fusion)
+12. [Model Contracts](#12-model-contracts)
+13. [DDL Ownership: dbt vs. External Pipeline](#13-ddl-ownership-dbt-vs-external-pipeline)
 
 ---
 
@@ -448,6 +450,48 @@ where net_amount < 0
 - `dbt test` runs all tests without building models (useful for monitoring).
 - In CI, tests run as part of `dbt build --select state:modified+` — only testing what changed.
 
+### dbt-expectations: Statistical Tests
+
+The `calogica/dbt_expectations` package adds a library of statistical and data-quality tests that go far beyond `not_null` and `unique`. Install it via `packages.yml` — it's already included in this project.
+
+**What problem it solves:** Built-in dbt tests check structure (is this column null? is this value in a list?). dbt-expectations checks *content* (are values in a reasonable range? does this column match an email pattern? does the table have a minimum number of rows?).
+
+**Key tests used in this project:**
+
+```yaml
+# Range check — numeric column must be >= 0
+- dbt_expectations.expect_column_values_to_be_between:
+    min_value: 0
+
+# Strictly positive (> 0, not just >= 0)
+- dbt_expectations.expect_column_values_to_be_between:
+    min_value: 0
+    strictly: true   # 0 is not allowed
+
+# Regex pattern — basic email format
+- dbt_expectations.expect_column_values_to_match_regex:
+    regex: '^[^@\s]+@[^@\s]+\.[^@\s]+$'
+
+# Minimum row count (table is not suspiciously empty)
+- dbt_expectations.expect_table_row_count_to_be_between:
+    min_value: 1
+```
+
+**Where to use them:**
+
+| Zone | Recommended Tests |
+|------|-------------------|
+| Gold dimensions | `expect_column_values_to_be_between` on numeric metrics, `expect_column_values_to_match_regex` on emails/codes |
+| Gold facts | `expect_column_values_to_be_between` on quantities and amounts (catch negative revenue) |
+| Gold analytics | Range checks on all aggregated metrics |
+
+**When NOT to use dbt-expectations:**
+- Don't add regex tests on free-text columns (names, addresses) — they fail on legitimate data.
+- Don't add row count tests on empty reference tables in dev (seeds may have fewer rows).
+- These tests are slower than schema tests — use them on the gold layer, not on every staging model.
+
+> **Reference:** [dbt-expectations package](https://github.com/calogica/dbt-expectations)
+
 > **Reference:** [dbt Testing](https://docs.getdbt.com/docs/build/data-tests)
 
 ---
@@ -715,7 +759,7 @@ dbt generates artifacts after every run in the `target/` directory:
 | **Snapshot `check_cols` performance** | Using `check_cols='all'` on wide tables (100+ columns) generates massive MERGE statements. Slow and error-prone. | Use `strategy='timestamp'` with `updated_at` column instead. Much faster. |
 | **Secure views not default** | dbt creates regular views. Snowflake Secure Views (which hide SQL definition from non-owners) require explicit config. | `{{ config(materialized='view', secure=true) }}` |
 | **Transient tables** | Snowflake transient tables have limited Time Travel (0-1 day) and no Fail-safe. dbt supports this via config but it's opt-in. | `{{ config(transient='true') }}` — use for staging/transient zone. |
-| **Copy grants** | `CREATE OR REPLACE TABLE` drops grants. dbt has a `copy_grants` config but it only works for views on some adapters. For tables, grants may still be lost. | Use `+copy_grants: true` in `dbt_project.yml`. Test in your environment. Or use post-hooks: `grant select on {{ this }} to role analyst`. |
+| **Copy grants** | `CREATE OR REPLACE TABLE` drops grants. | Use `+copy_grants: true` in `dbt_project.yml` AND Snowflake future grants (`GRANT SELECT ON FUTURE TABLES IN SCHEMA ... TO ROLE ...`). Together, these eliminate grant loss without post-hooks. See [section 13](#13-ddl-ownership-dbt-vs-external-pipeline). |
 | **Merge behavior with nulls** | Snowflake's MERGE treats NULL != NULL (SQL standard). If your `unique_key` column can be null, the merge won't match correctly. | Ensure `unique_key` columns are `NOT NULL`, or use `coalesce()` in your key. |
 | **Large SQL compilation** | Very complex models with many macros can compile to SQL exceeding Snowflake's 1MB query size limit. Rare but happens with dynamic SQL generation. | Break the model into smaller pieces or reduce macro nesting. |
 
@@ -831,13 +875,220 @@ These Snowflake objects must be managed outside dbt (via DDLs, Terraform, or Sno
 
 ---
 
+## 12. Model Contracts
+
+### What Is a dbt Contract?
+
+A **model contract** is a formal declaration of what columns your model will produce and what data types they must have. dbt enforces this declaration before any data is written — if the model's output doesn't match what you declared, the build fails.
+
+Think of it as a typed interface between your model and its consumers (BI tools, downstream models, analysts).
+
+**To enable a contract on a model:**
+
+```yaml
+# In _gold__models.yml
+models:
+  - name: dim_customers
+    config:
+      contract:
+        enforced: true        # ← enables the contract
+    columns:
+      - name: customer_id
+        data_type: integer    # ← every column MUST declare its type
+        data_tests:
+          - not_null
+          - unique
+      - name: email
+        data_type: varchar
+      - name: created_at
+        data_type: timestamp_ntz
+```
+
+### How Does dbt Enforce Types — Does It Add CAST?
+
+**No. dbt does NOT add CAST to your SELECT statement.**
+
+This is a common misconception. Here is exactly what happens:
+
+Without a contract, dbt generates:
+```sql
+CREATE OR REPLACE TABLE gold.dim_customers AS
+SELECT customer_id, email, created_at FROM ...
+```
+
+With a contract (`enforced: true`), dbt generates:
+```sql
+CREATE OR REPLACE TABLE gold.dim_customers (
+    customer_id INTEGER,
+    email       VARCHAR,
+    created_at  TIMESTAMP_NTZ
+) AS
+SELECT customer_id, email, created_at FROM ...
+```
+
+The types are declared in the `CREATE TABLE` DDL — **not** injected as CAST into the SELECT. Snowflake enforces types at the DDL level when it creates the table. If the SELECT produces a column that doesn't match, Snowflake raises an error.
+
+**Zero runtime overhead** — there is no extra step, no CAST computation, no schema comparison at runtime. The type check happens at table creation time as part of normal Snowflake DDL execution.
+
+### Snowflake Type Names for Contracts
+
+Use these exact type names in `data_type:` (Snowflake-native names, not generic SQL):
+
+| dbt `data_type` value | Snowflake type | Use for |
+|-----------------------|----------------|---------|
+| `integer` | `INTEGER` / `NUMBER(38,0)` | IDs, counts, quantities |
+| `varchar` | `VARCHAR` | Text, codes, names |
+| `float` | `FLOAT` / `DOUBLE` | Prices, amounts, ratios |
+| `boolean` | `BOOLEAN` | Flags (is_active, is_deleted) |
+| `date` | `DATE` | Calendar dates (no time) |
+| `timestamp_ntz` | `TIMESTAMP_NTZ` | Timestamps without timezone (standard for dbt) |
+| `timestamp_tz` | `TIMESTAMP_TZ` | Timestamps with timezone |
+| `variant` | `VARIANT` | Semi-structured / JSON |
+
+> **Tip:** Avoid generic types like `number` or `string` — use Snowflake-specific names to prevent ambiguity.
+
+### When to Use Contracts
+
+| Situation | Use Contract? | Why |
+|-----------|:-------------:|-----|
+| Gold layer (dims, facts) | **Yes** | These are consumed by BI tools. Schema stability is critical. |
+| Silver layer | Optional | Useful for shared models with many consumers |
+| Transient / bronze | **No** | These are internal, frequently evolving, change often |
+| Ephemeral models | **No** | Ephemeral models can't have contracts (no table to enforce on) |
+
+### Common Mistakes with Contracts
+
+1. **Missing a column** — if your SELECT produces a column not declared in the contract, the build fails. You must declare every column the model outputs.
+2. **Wrong type name** — `string` instead of `varchar`, `int` instead of `integer`. Check Snowflake docs.
+3. **Nullable mismatch** — contracts don't enforce nullability by default. Add `not_null` tests separately.
+4. **Adding a column without updating the contract** — if you add a column to the SELECT but forget to declare it in the YAML, the build will fail. This is intentional — it forces you to explicitly declare the new column.
+
+### What Contracts Don't Do
+
+- They do NOT prevent a BI tool from querying the table with the wrong type expectation.
+- They do NOT validate values (use `dbt-expectations` for that).
+- They do NOT track schema history (use `dbt snapshot` or an external tool for that).
+
+Contracts enforce **structure**, not **content**.
+
+> **Reference:** [dbt Model Contracts](https://docs.getdbt.com/docs/collaborate/govern/model-contracts)
+
+---
+
+## 13. DDL Ownership: dbt vs. External Pipeline
+
+### The Core Question
+
+Should dbt create and own your Snowflake tables, or should you manage table structure in a separate DDL pipeline (like the `ddls/` folder in this project)?
+
+This is one of the most important architectural decisions in a dbt project. Both approaches work — the choice depends on your team's priorities.
+
+### Side-by-Side Comparison
+
+| Concern | dbt Manages Tables | External DDL Pipeline (`ddls/`) |
+|---------|-------------------|--------------------------------|
+| **How tables are created** | `CREATE OR REPLACE TABLE` (dbt) | `CREATE OR ALTER TABLE` (DDL script) |
+| **Schema evolution** | dbt drops and recreates the table | `ALTER TABLE ADD COLUMN` — table is never dropped |
+| **Grant loss risk** | Yes — `CREATE OR REPLACE` drops all grants | No — `CREATE OR ALTER` preserves grants and policies |
+| **Source of truth** | dbt YAML is the schema definition | DDL `.sql` file is the schema definition |
+| **Drift detection** | dbt tests catch value-level issues, not schema drift | DDL CI reruns on every merge — drift is impossible if DDL always wins |
+| **Column documentation** | Declared in dbt YAML, queryable from `dbt docs` | Not automatically in dbt docs (must add manually) |
+| **Snowflake lineage** | Full column-level lineage via dbt artifacts | Partial — dbt doesn't know about DDL-defined structure |
+| **Complexity** | Single pipeline (dbt does everything) | Two pipelines to maintain (DDL CI + dbt CI) |
+| **Enforcement at deploy time** | Contracts catch schema mismatches before writing data | DDL deploys independently — dbt doesn't check DDL matches |
+
+### Solving the Main Problems with dbt-Managed Tables
+
+If you choose dbt to manage tables, two problems need explicit solutions:
+
+#### Problem 1: Grant Loss on Every Run
+
+Every time dbt runs `CREATE OR REPLACE TABLE`, Snowflake drops the table and recreates it. All grants (`GRANT SELECT TO ROLE`) are lost. The next `SELECT` from a BI tool fails with "Insufficient privileges."
+
+**Solution — two-part fix:**
+
+**Part 1:** Add `+copy_grants: true` to `dbt_project.yml`. This tells dbt to add `COPY GRANTS` to every `CREATE OR REPLACE TABLE`, which copies the grants from the old table to the new one.
+
+```yaml
+# dbt_project.yml
+models:
+  your_project:
+    +copy_grants: true
+```
+
+**Part 2:** Use Snowflake **future grants** for any new tables that don't exist yet (copy_grants can't copy from a table that never existed):
+
+```sql
+-- Run once per schema — new tables automatically inherit these grants
+GRANT SELECT ON FUTURE TABLES IN SCHEMA APP_DB.GOLD TO ROLE ANALYST_ROLE;
+GRANT SELECT ON FUTURE TABLES IN SCHEMA APP_DB.GOLD TO ROLE BI_ROLE;
+```
+
+With both in place: existing tables keep their grants via `COPY GRANTS`, and new tables automatically receive grants via future grants. **No post-hooks needed.**
+
+#### Problem 2: Zero-Downtime Schema Changes
+
+`CREATE OR REPLACE TABLE` drops the table briefly during replacement. For BI tools actively querying the table, this causes "Table not found" errors during the window between DROP and CREATE.
+
+**Solution:** Use `incremental` materialization with `on_schema_change='sync_all_columns'` for tables that need zero-downtime updates:
+
+```sql
+{{ config(
+    materialized='incremental',
+    unique_key='customer_id',
+    on_schema_change='sync_all_columns'  -- adds new columns, drops removed columns
+) }}
+```
+
+With this setting:
+- The table is **never dropped**. dbt issues `ALTER TABLE ADD COLUMN` for new columns.
+- BI tools continue querying the table throughout the dbt run.
+- New columns are added, removed columns are dropped — all via ALTER, not DROP+CREATE.
+
+> **Warning:** `sync_all_columns` will drop columns that you remove from the model. This can delete data. Use with care on fact tables with long history.
+
+### Recommended Approach for This Project
+
+This project uses a **hybrid approach**:
+
+| Object | Managed By | Reason |
+|--------|------------|--------|
+| Databases, warehouses, roles, schemas | `ddls/` pipeline | Infrastructure — dbt can't manage these |
+| Raw/staging tables (RAW schema) | `ddls/` pipeline | Source tables populated by Fivetran, not dbt |
+| dbt-transformed tables (transient → gold) | dbt | Transformation is dbt's purpose; contracts enforce schema |
+| Procedures, tasks, streams | `ddls/` pipeline | Not supported by dbt |
+
+**For dbt-managed tables (gold layer), enable:**
+1. `contract: enforced: true` — schema declared explicitly in YAML
+2. `+copy_grants: true` in `dbt_project.yml` — grants survive table recreation
+3. Future grants in DDLs — new tables auto-receive grants
+4. `dbt-expectations` range/regex tests — catch value-level issues contracts can't
+
+### Column Lineage with External DDL Management
+
+When tables are defined in DDLs (outside dbt), dbt doesn't know their column structure — they don't appear in `dbt docs`. Use these tools to bridge the gap:
+
+| Tool | What it provides |
+|------|-----------------|
+| **Snowflake `ACCOUNT_USAGE.OBJECT_DEPENDENCIES`** | SQL-level object dependencies (which view references which table) |
+| **Snowflake `ACCESS_HISTORY`** | Column-level read/write lineage from query history |
+| **Snowflake Horizon** | Built-in data catalog, lineage, and governance UI across all Snowflake objects |
+| **dbt-labs/codegen** package | Generates dbt YAML from `INFORMATION_SCHEMA` — auto-documents existing tables |
+| **Atlan / DataHub** | Third-party data catalogs that integrate both dbt artifacts AND Snowflake metadata |
+
+For most teams using this project, **Snowflake Horizon** is the practical starting point — it's already included in your Snowflake account and provides cross-tool lineage without extra setup.
+
+> **Reference:** [dbt copy_grants](https://docs.getdbt.com/reference/resource-configs/snowflake-configs#copying-grants), [Snowflake Future Grants](https://docs.snowflake.com/en/sql-reference/sql/grant-privilege#future-grants-on-database-objects)
+
+---
+
 ## Quick Reference Card
 
 ```
 MATERIALIZATION       table → incremental → view → ephemeral
                       (most concrete)              (least concrete)
 
-TESTING PRIORITY      PK (unique+not_null) → FK (relationships) → business rules → freshness
+TESTING PRIORITY      PK (unique+not_null) → FK (relationships) → dbt-expectations → freshness
 
 SELECTORS             model+ (downstream)  +model (upstream)  +model+ (full lineage)
                       state:modified+      tag:gold           path:models/gold/
@@ -847,6 +1098,10 @@ COMMANDS              dbt build (always)   dbt compile (debug)   dbt docs genera
 ENVIRONMENTS          dev (isolated)  →  uat (shared test)  →  main (production)
 
 INCREMENTAL SAFETY    is_incremental() guard  +  lookback window  +  merge unique_key
+
+GRANT SAFETY          +copy_grants: true  +  FUTURE GRANTS on schemas  (no post-hooks needed)
+
+CONTRACTS             enforced: true  +  data_type on every column  +  no CAST added to SQL
 ```
 
 ---
