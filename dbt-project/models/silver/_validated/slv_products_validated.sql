@@ -32,6 +32,7 @@ standardized as (
         initcap(trim(brand)) as brand,
         price,
         cost,
+        is_active,
         created_at,
         updated_at,
         _source_system,

@@ -7,13 +7,21 @@
 
 -- Daily revenue aggregation for Power BI dashboards.
 
-select
-    fct.order_date,
-    count(distinct fct.order_id) as total_orders,
-    count(distinct fct.customer_id) as unique_customers,
-    sum(fct.total_price) as total_revenue,
-    sum(fct.quantity) as total_units_sold,
-    sum(fct.discount_amount) as total_discounts,
-    avg(fct.unit_price) as avg_unit_price
-from {{ ref('fct_orders') }} as fct
-group by fct.order_date
+with source as (
+    select * from {{ ref('fct_orders') }}
+),
+
+final as (
+    select
+        order_date,
+        count(distinct order_id)   as total_orders,
+        count(distinct customer_id) as unique_customers,
+        sum(total_price)            as total_revenue,
+        sum(quantity)               as total_units_sold,
+        sum(discount_amount)        as total_discounts,
+        avg(unit_price)             as avg_unit_price
+    from source
+    group by order_date
+)
+
+select * from final

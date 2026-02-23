@@ -20,6 +20,7 @@
 11. [dbt Ecosystem: Core, Cloud, and Fusion](#11-dbt-ecosystem-core-cloud-and-fusion)
 12. [Model Contracts](#12-model-contracts)
 13. [DDL Ownership: dbt vs. External Pipeline](#13-ddl-ownership-dbt-vs-external-pipeline)
+14. [Observability: Query Tags and Execution Logs](#14-observability-query-tags-and-execution-logs)
 
 ---
 
@@ -1079,6 +1080,239 @@ When tables are defined in DDLs (outside dbt), dbt doesn't know their column str
 For most teams using this project, **Snowflake Horizon** is the practical starting point — it's already included in your Snowflake account and provides cross-tool lineage without extra setup.
 
 > **Reference:** [dbt copy_grants](https://docs.getdbt.com/reference/resource-configs/snowflake-configs#copying-grants), [Snowflake Future Grants](https://docs.snowflake.com/en/sql-reference/sql/grant-privilege#future-grants-on-database-objects)
+
+---
+
+## 14. Observability: Query Tags and Execution Logs
+
+### The Problem: dbt Has No Built-in Log Table
+
+Before dbt, stored procedures could write to a log table after each step:
+```sql
+INSERT INTO n_log_execution (job_name, step, rows_inserted, status, ...) VALUES (...);
+```
+
+In dbt, a model compiles to **one single SQL statement** (`CREATE TABLE AS SELECT ... WITH cte1 AS (...)`). Snowflake executes it as one query — there is no "between steps" where you can inject a log write. The CTEs are part of the query plan, not separate executions.
+
+What you get instead is **one row per model** in `SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY` — with timing, row counts, and error messages already there natively. The only thing missing is *which model* produced that query. That's what **QUERY_TAG** solves.
+
+### The Architecture: Two Macros + One View
+
+```
+Airflow DAG triggers dbt build
+        │
+        ▼
+on-run-start fires once
+→ ALTER SESSION SET QUERY_TAG = '{"invocation_id":"abc123","env":"prod","airflow_run_id":"dag_run_xyz"}'
+        │
+        ▼  (for each model in DAG order)
++pre-hook fires before EVERY model
+→ ALTER SESSION SET QUERY_TAG = '{"invocation_id":"abc123","model":"dim_customers","schema":"gold",...}'
+        │
+        ▼
+dbt executes: CREATE TABLE gold.dim_customers (...) AS SELECT ...
+→ Snowflake records this query in QUERY_HISTORY with the QUERY_TAG attached
+        │
+        ▼
++pre-hook for next model → ... → next model → ...
+        │
+        ▼
+on-run-end fires once
+→ ALTER SESSION UNSET QUERY_TAG
+
+Later: query V_DBT_EXECUTION_LOG to see timing, row counts, errors per model
+```
+
+**What's native in Snowflake (no custom code needed):**
+- Start time, end time, duration
+- Rows inserted / updated / deleted
+- Status (SUCCESS / FAIL) and full error message
+- Query ID for deep-linking to Query Profile
+
+**What you inject via QUERY_TAG (6 fields, set once per model):**
+- `invocation_id` — dbt's unique run ID (links all models in one build)
+- `model` — model name (e.g., `dim_customers`)
+- `schema` — target schema (e.g., `gold`)
+- `materialized` — table / incremental / view
+- `env` — dev / uat / prod
+- `airflow_run_id` — Airflow DAG run ID, or "manual"
+
+### How It's Implemented in This Project
+
+**[macros/observability.sql](dbt-project/macros/observability.sql)** — two macros:
+
+```sql
+-- Called once per run via on-run-start
+{% macro set_job_query_tag() %}
+    {%- set tag = '{'
+        ~ '"invocation_id":"' ~ invocation_id ~ '",'
+        ~ '"job":"dbt_build_' ~ target.name ~ '",'
+        ~ '"env":"' ~ target.name ~ '",'
+        ~ '"airflow_run_id":"' ~ env_var("AIRFLOW_RUN_ID", "manual") ~ '",'
+        ~ '"github_run_id":"' ~ env_var("GITHUB_RUN_ID", "local") ~ '"'
+        ~ '}' -%}
+    alter session set query_tag = '{{ tag }}';
+{% endmacro %}
+
+-- Called before EVERY model via +pre-hook
+{% macro set_model_query_tag() %}
+    {%- set tag = '{'
+        ~ '"invocation_id":"' ~ invocation_id ~ '",'
+        ~ '"env":"' ~ target.name ~ '",'
+        ~ '"model":"' ~ this.name ~ '",'
+        ~ '"schema":"' ~ this.schema ~ '",'
+        ~ '"materialized":"' ~ config.get("materialized", "unknown") ~ '",'
+        ~ '"airflow_run_id":"' ~ env_var("AIRFLOW_RUN_ID", "manual") ~ '"'
+        ~ '}' -%}
+    alter session set query_tag = '{{ tag }}';
+{% endmacro %}
+```
+
+**[dbt_project.yml](dbt-project/dbt_project.yml)** — hook config:
+
+```yaml
+on-run-start:
+  - "{{ set_job_query_tag() }}"    # fires once before the whole run
+
+on-run-end:
+  - "alter session unset query_tag"
+
+models:
+  ci_cd_project:
+    +pre-hook:
+      - "{{ set_model_query_tag() }}"    # fires before EVERY model
+```
+
+### The Two Snowflake Views
+
+**[ddls/_DB_UTILS/PUBLIC/views/v_dbt_execution_log.sql](ddls/_DB_UTILS/PUBLIC/views/v_dbt_execution_log.sql)** creates two views:
+
+| View | Source | Latency | Retention | Use for |
+|------|--------|---------|-----------|---------|
+| `V_DBT_EXECUTION_LOG` | `ACCOUNT_USAGE.QUERY_HISTORY` | 45 min – 3 h | 1 year | Historical dashboards, trend analysis |
+| `V_DBT_EXECUTION_LOG_REALTIME` | `INFORMATION_SCHEMA.QUERY_HISTORY()` | Real-time | 7 days | Checking status right after a run |
+
+Both views expose the same columns. They're queryable from any tool connected to Snowflake.
+
+### Example Queries
+
+```sql
+-- 1. All models from a specific Airflow run, in execution order
+SELECT model, model_schema, materialized, duration_seconds, status, rows_inserted, error_message
+FROM _DB_UTILS.PUBLIC.V_DBT_EXECUTION_LOG
+WHERE airflow_run_id = 'scheduled__2024-02-20T06:00:00+00:00'
+ORDER BY event_sequence;
+
+-- 2. Slowest models in prod over the last 30 days (find optimization targets)
+SELECT
+    model,
+    ROUND(AVG(duration_seconds), 1) AS avg_seconds,
+    MAX(duration_seconds)            AS max_seconds,
+    COUNT(*)                         AS run_count
+FROM _DB_UTILS.PUBLIC.V_DBT_EXECUTION_LOG
+WHERE env = 'prod'
+  AND status = 'SUCCESS'
+  AND start_time >= DATEADD(day, -30, CURRENT_TIMESTAMP())
+GROUP BY model
+ORDER BY avg_seconds DESC;
+
+-- 3. All failures this week with error details
+SELECT invocation_id, model, error_message, start_time
+FROM _DB_UTILS.PUBLIC.V_DBT_EXECUTION_LOG
+WHERE status = 'FAIL'
+  AND start_time >= DATEADD(day, -7, CURRENT_TIMESTAMP())
+ORDER BY start_time DESC;
+
+-- 4. Row count trend for dim_customers (catch sudden drops/spikes)
+SELECT
+    start_time::DATE AS run_date,
+    rows_inserted,
+    duration_seconds
+FROM _DB_UTILS.PUBLIC.V_DBT_EXECUTION_LOG
+WHERE model = 'dim_customers'
+  AND env   = 'prod'
+ORDER BY run_date DESC
+LIMIT 30;
+
+-- 5. Full summary of one dbt invocation (replaces N_LOG_EXECUTION)
+SELECT
+    event_sequence,
+    model,
+    model_schema,
+    duration_seconds,
+    status,
+    rows_inserted,
+    rows_updated,
+    error_message
+FROM _DB_UTILS.PUBLIC.V_DBT_EXECUTION_LOG
+WHERE invocation_id = 'abc123def456'
+ORDER BY event_sequence;
+```
+
+### Airflow Integration Example
+
+When Airflow triggers dbt, it passes its run ID as an environment variable. The macro picks it up automatically via `env_var("AIRFLOW_RUN_ID", "manual")`.
+
+```python
+# Airflow DAG: trigger dbt with run ID injected into the environment
+from airflow.decorators import dag, task
+from airflow.operators.bash import BashOperator
+import pendulum
+
+@dag(schedule="0 6 * * *", start_date=pendulum.datetime(2024, 1, 1))
+def dbt_daily_build():
+
+    run_dbt = BashOperator(
+        task_id="dbt_build",
+        bash_command="cd /opt/dbt-project && dbt build --target prod --select state:modified+",
+        env={
+            # This env var is read by set_job_query_tag() and set_model_query_tag()
+            # It links every model's QUERY_TAG to this specific Airflow run
+            "AIRFLOW_RUN_ID": "{{ run_id }}",
+            # Snowflake credentials (from Airflow connections or Variables)
+            "SNOWFLAKE_ACCOUNT":   "{{ var.value.snowflake_account }}",
+            "SNOWFLAKE_USER":      "{{ var.value.snowflake_user }}",
+            "SNOWFLAKE_PASSWORD":  "{{ var.value.snowflake_password }}",
+            "SNOWFLAKE_ROLE":      "DBT_PROD_ROLE",
+            "SNOWFLAKE_WAREHOUSE": "ANALYTICS_WH",
+            "SNOWFLAKE_DATABASE":  "APP_DB",
+        },
+    )
+
+    # After dbt finishes, query the realtime view to check for failures
+    check_failures = BashOperator(
+        task_id="check_failures",
+        bash_command="""
+            snowsql -q "
+                SELECT COUNT(*) AS failures
+                FROM _DB_UTILS.PUBLIC.V_DBT_EXECUTION_LOG_REALTIME
+                WHERE airflow_run_id = '{{ run_id }}'
+                  AND status = 'FAIL';
+            "
+        """,
+    )
+
+    run_dbt >> check_failures
+
+dbt_daily_build()
+```
+
+After the run, an analyst can query `V_DBT_EXECUTION_LOG` with that `run_id` and see every model's timing, row counts, and status — exactly like the old `N_LOG_EXECUTION` table, with zero custom log inserts.
+
+### What This Replaces vs. What It Can't Do
+
+| Old stored proc capability | dbt + QUERY_TAG equivalent |
+|---------------------------|---------------------------|
+| Log after step 1 (CTE 1) | **Not possible** — CTEs are one query. Split into separate models if step-level timing is needed. |
+| Log after the whole proc | ✅ One row per model in `V_DBT_EXECUTION_LOG` |
+| Job-level start/end | ✅ Group by `invocation_id`, use MIN/MAX of `start_time`/`end_time` |
+| Error message capture | ✅ `error_message` column from `QUERY_HISTORY` |
+| Row counts per step | ✅ `rows_inserted`, `rows_updated`, `rows_deleted` per model |
+| Trigger source (Airflow, manual) | ✅ `airflow_run_id` in QUERY_TAG |
+| Cross-run trend analysis | ✅ `V_DBT_EXECUTION_LOG` (1-year history in ACCOUNT_USAGE) |
+| Real-time status during run | ✅ `V_DBT_EXECUTION_LOG_REALTIME` (INFORMATION_SCHEMA, no latency) |
+
+> **Key insight:** A dbt model = one Snowflake query = one `QUERY_ID`. If you need step-level visibility into a model's CTEs, the right answer is to split that model into intermediate models — each CTE becomes its own model with its own row in `QUERY_HISTORY`. This also improves lineage and testability.
 
 ---
 

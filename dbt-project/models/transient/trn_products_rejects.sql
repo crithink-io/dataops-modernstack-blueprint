@@ -14,7 +14,7 @@ with source as (
     {% endif %}
 ),
 
-rejected as (
+classified as (
     select
         product_id,
         product_name,
@@ -34,14 +34,18 @@ rejected as (
             when cost is null then 'cost is null'
             else null
         end as _reject_reason,
-        current_timestamp() as _rejected_at,
-        '{{ invocation_id }}' as _batch_id,
-        {{ dbt_utils.generate_surrogate_key(['product_id', 'product_name']) }} as _reject_id
+        current_timestamp()                                                         as _rejected_at,
+        '{{ invocation_id }}'                                                       as _batch_id,
+        {{ dbt_utils.generate_surrogate_key(['product_id', 'product_name']) }}      as _reject_id
     from source
+),
+
+final as (
+    select * from classified
+    where _reject_reason is not null
+    {% if is_incremental() %}
+        and _rejected_at > (select max(_rejected_at) from {{ this }})
+    {% endif %}
 )
 
-select * from rejected
-where _reject_reason is not null
-{% if is_incremental() %}
-    and _rejected_at > (select max(_rejected_at) from {{ this }})
-{% endif %}
+select * from final

@@ -24,6 +24,27 @@ clean-targets:
 vars:
   schema_id: ''
 
+# ── Observability: Query Tag instrumentation ─────────────────────
+#
+# set_job_query_tag fires once at the start of every dbt run and
+# injects invocation_id, env, and trigger context (Airflow/GitHub)
+# into the Snowflake session. Every query in the session inherits
+# this tag, so it appears in SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY.
+#
+# set_model_query_tag fires before each model's SQL and overrides
+# the session tag with model-level detail (model name, schema, type).
+# After this ALTER SESSION, the model's CTAS/MERGE is tagged in
+# QUERY_HISTORY with the model name — no custom log table needed.
+#
+# See macros/observability.sql and ddls/_DB_UTILS/PUBLIC/views/v_dbt_execution_log.sql
+# for the full architecture and the query to read execution history.
+#
+on-run-start:
+  - "{{ set_job_query_tag() }}"
+
+on-run-end:
+  - "alter session unset query_tag"
+
 # ── Zone-level model configuration ──────────────────────────────
 #
 # The "+" prefix means "this is a CONFIG property, not a subfolder".
@@ -43,6 +64,13 @@ vars:
 #
 models:
   ci_cd_project:
+
+    # +pre-hook fires before every model's SQL.
+    # It sets the Snowflake QUERY_TAG to include the model name, schema,
+    # and materialization type so they appear in QUERY_HISTORY alongside
+    # native timing and row count data. No log inserts needed.
+    +pre-hook:
+      - "{{ set_model_query_tag() }}"
 
     # TRANSIENT: Landing zone. Truncate & reload every run.
     # "table" because we want to fully replace data each run (drop + recreate).
