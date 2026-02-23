@@ -171,15 +171,18 @@ jobs:
         continue-on-error: true
         run: dbt source freshness --target $DBT_TARGET --vars "schema_id: $SCHEMA_ID"
 
-      # ── Detect which schemas the modified models need ────────
-      # With --defer, unmodified upstream models are read from
-      # production, so we only need to clone schemas that actually
-      # contain modified (or downstream) models.
-      # Falls back to all schemas on first run (no manifest).
-      - name: Detect impacted schemas
+      # ── Detect which tables the modified models need ──────────
+      # With --defer, unmodified upstream models are read from production.
+      # We clone only the specific tables for modified (and downstream) models.
+      # Falls back to full clone ('*') on first run (no manifest) or
+      # when changes are macro/config-only with no recognisable model names.
+      #
+      # TABLE_LIST slim example: 'SILVER.SLV_CUSTOMERS,GOLD.DIM_CUSTOMERS'
+      # TABLE_LIST full fallback: '*'  (procedure scans all schemas)
+      - name: Detect impacted tables
         run: |
           if [ "$HAS_MANIFEST" = "true" ]; then
-            echo "Detecting impacted schemas from state:modified+..."
+            echo "Detecting impacted tables from state:modified+..."
             MODIFIED=$(dbt ls \
               --select 'state:modified+' \
               --state ./state \
@@ -187,23 +190,31 @@ jobs:
               --vars "schema_id: $SCHEMA_ID" \
               2>/dev/null || echo "")
 
-            SCHEMA_LIST=""
-            echo "$MODIFIED" | grep -q "trn_"       && SCHEMA_LIST="TRANSIENT"
-            echo "$MODIFIED" | grep -q "brz_"       && SCHEMA_LIST="${SCHEMA_LIST:+$SCHEMA_LIST,}BRONZE"
-            echo "$MODIFIED" | grep -q "slv_"       && SCHEMA_LIST="${SCHEMA_LIST:+$SCHEMA_LIST,}SILVER"
-            echo "$MODIFIED" | grep -qE "(dim_|fct_)" && SCHEMA_LIST="${SCHEMA_LIST:+$SCHEMA_LIST,}GOLD"
-            echo "$MODIFIED" | grep -q "agg_"       && SCHEMA_LIST="${SCHEMA_LIST:+$SCHEMA_LIST,}GOLD_ANALYTICS"
+            TABLE_LIST=""
+            while IFS= read -r line; do
+              # Strip project prefix: "project.model_name" -> "MODEL_NAME"
+              model=$(echo "$line" | sed 's/.*\.//' | tr '[:lower:]' '[:upper:]')
+              case "$model" in
+                TRN_*) schema="TRANSIENT" ;;
+                BRZ_*) schema="BRONZE"    ;;
+                SLV_*) schema="SILVER"    ;;
+                DIM_*|FCT_*) schema="GOLD" ;;
+                AGG_*) schema="GOLD_ANALYTICS" ;;
+                *) continue ;;  # skip seeds, snapshots, macros-only changes
+              esac
+              TABLE_LIST="${TABLE_LIST:+$TABLE_LIST,}${schema}.${model}"
+            done <<< "$MODIFIED"
 
-            # Fallback: if nothing matched (e.g. macros-only change), clone all
-            [ -z "$SCHEMA_LIST" ] && SCHEMA_LIST="TRANSIENT,BRONZE,SILVER,GOLD,GOLD_ANALYTICS"
-            echo "Impacted schemas: $SCHEMA_LIST"
+            # Fallback: macros-only or unrecognised models — full clone
+            [ -z "$TABLE_LIST" ] && TABLE_LIST="*"
+            echo "Table list: $TABLE_LIST"
           else
-            SCHEMA_LIST="TRANSIENT,BRONZE,SILVER,GOLD,GOLD_ANALYTICS"
-            echo "No manifest — cloning all schemas."
+            TABLE_LIST="*"
+            echo "No manifest — full clone."
           fi
-          echo "SCHEMA_LIST=$SCHEMA_LIST" >> $GITHUB_ENV
+          echo "TABLE_LIST=$TABLE_LIST" >> $GITHUB_ENV
 
-      # ── Clone only impacted schemas into PR schema ────────────
+      # ── Clone only impacted tables into PR schema ─────────────
       - name: Clone data for CI
         run: |
           dbt run-operation clone_for_ci \
@@ -211,11 +222,12 @@ jobs:
             --vars "schema_id: $SCHEMA_ID" \
             --args "{
               source_db: '$SOURCE_DB',
-              source_schema_list: '$SCHEMA_LIST',
+              source_schema_list: 'TRANSIENT,BRONZE,SILVER,GOLD,GOLD_ANALYTICS',
               target_schema: 'PR_$SCHEMA_ID',
               env_type: '$TARGET_ENV',
               sample_pct: $SAMPLE_PCT,
-              role_name: '${{ secrets.SNOWFLAKE_CI_ROLE }}'
+              role_name: '${{ secrets.SNOWFLAKE_CI_ROLE }}',
+              table_list: '$TABLE_LIST'
             }"
 
       # ── dbt build (slim CI when state is available) ───────────
