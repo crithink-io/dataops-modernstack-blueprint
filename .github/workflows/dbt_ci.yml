@@ -171,7 +171,39 @@ jobs:
         continue-on-error: true
         run: dbt source freshness --target $DBT_TARGET --vars "schema_id: $SCHEMA_ID"
 
-      # ── Clone data into PR schema via stored procedure ────────
+      # ── Detect which schemas the modified models need ────────
+      # With --defer, unmodified upstream models are read from
+      # production, so we only need to clone schemas that actually
+      # contain modified (or downstream) models.
+      # Falls back to all schemas on first run (no manifest).
+      - name: Detect impacted schemas
+        run: |
+          if [ "$HAS_MANIFEST" = "true" ]; then
+            echo "Detecting impacted schemas from state:modified+..."
+            MODIFIED=$(dbt ls \
+              --select 'state:modified+' \
+              --state ./state \
+              --target $DBT_TARGET \
+              --vars "schema_id: $SCHEMA_ID" \
+              2>/dev/null || echo "")
+
+            SCHEMA_LIST=""
+            echo "$MODIFIED" | grep -q "trn_"       && SCHEMA_LIST="TRANSIENT"
+            echo "$MODIFIED" | grep -q "brz_"       && SCHEMA_LIST="${SCHEMA_LIST:+$SCHEMA_LIST,}BRONZE"
+            echo "$MODIFIED" | grep -q "slv_"       && SCHEMA_LIST="${SCHEMA_LIST:+$SCHEMA_LIST,}SILVER"
+            echo "$MODIFIED" | grep -qE "(dim_|fct_)" && SCHEMA_LIST="${SCHEMA_LIST:+$SCHEMA_LIST,}GOLD"
+            echo "$MODIFIED" | grep -q "agg_"       && SCHEMA_LIST="${SCHEMA_LIST:+$SCHEMA_LIST,}GOLD_ANALYTICS"
+
+            # Fallback: if nothing matched (e.g. macros-only change), clone all
+            [ -z "$SCHEMA_LIST" ] && SCHEMA_LIST="TRANSIENT,BRONZE,SILVER,GOLD,GOLD_ANALYTICS"
+            echo "Impacted schemas: $SCHEMA_LIST"
+          else
+            SCHEMA_LIST="TRANSIENT,BRONZE,SILVER,GOLD,GOLD_ANALYTICS"
+            echo "No manifest — cloning all schemas."
+          fi
+          echo "SCHEMA_LIST=$SCHEMA_LIST" >> $GITHUB_ENV
+
+      # ── Clone only impacted schemas into PR schema ────────────
       - name: Clone data for CI
         run: |
           dbt run-operation clone_for_ci \
@@ -179,7 +211,7 @@ jobs:
             --vars "schema_id: $SCHEMA_ID" \
             --args "{
               source_db: '$SOURCE_DB',
-              source_schema_list: 'TRANSIENT,BRONZE,SILVER,GOLD,GOLD_ANALYTICS',
+              source_schema_list: '$SCHEMA_LIST',
               target_schema: 'PR_$SCHEMA_ID',
               env_type: '$TARGET_ENV',
               sample_pct: $SAMPLE_PCT,

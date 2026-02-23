@@ -1,0 +1,12 @@
+{
+  "recommendations": [
+    // SQL linting + formatting (SQLFluff)
+    "dorzey.vscode-sqlfluff",
+    // dbt development: lineage, autocomplete, model previews
+    "innoverio.vscode-dbt-power-user",
+    // Jinja template syntax highlighting for .sql files
+    "samuelcolvin.jinjahtml",
+    // YAML schema validation
+    "redhat.vscode-yaml"
+  ]
+}

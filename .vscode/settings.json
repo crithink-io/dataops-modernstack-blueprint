@@ -1,0 +1,37 @@
+{
+  // ── SQLFluff: lint and format SQL on save ──────────────────────────────
+  // Uses dbt-project/.sqlfluff (jinja templater, Snowflake dialect).
+  // For DDL files under ddls/, SQLFluff uses ddls/.sqlfluff automatically
+  // because SQLFluff walks up the directory tree to find the nearest config.
+  "sqlfluff.linter.run": "onSave",
+  "sqlfluff.format.enabled": true,
+  "sqlfluff.dialect": "snowflake",
+
+  // Apply SQLFluff as the default SQL formatter
+  "[sql]": {
+    "editor.defaultFormatter": "dorzey.vscode-sqlfluff",
+    "editor.formatOnSave": true
+  },
+  "[jinja-sql]": {
+    "editor.defaultFormatter": "dorzey.vscode-sqlfluff",
+    "editor.formatOnSave": true
+  },
+
+  // ── dbt Power User ─────────────────────────────────────────────────────
+  // Point to the dbt project folder (not the repo root)
+  "dbt.projectsDirectory": "${workspaceFolder}/dbt-project",
+
+  // ── File associations ──────────────────────────────────────────────────
+  // Treat dbt .sql files as jinja-sql for syntax highlighting
+  "files.associations": {
+    "*.sql": "jinja-sql"
+  },
+
+  // ── Editor quality of life ─────────────────────────────────────────────
+  "editor.rulers": [120],
+  "editor.tabSize": 4,
+  "editor.insertSpaces": true,
+  "[yaml]": {
+    "editor.tabSize": 2
+  }
+}
